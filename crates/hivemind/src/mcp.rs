@@ -130,7 +130,7 @@ pub struct ChangesSinceArgs {
     pub kinds: Vec<String>,
 }
 
-#[tool_router]
+#[tool_router(vis = "pub")]
 impl HiveMcp {
     fn new(client: Client) -> Self {
         Self {
