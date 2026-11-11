@@ -45,6 +45,10 @@ impl Timestamp {
         Self(self.0.saturating_add(days.saturating_mul(MS_PER_DAY)))
     }
 
+    pub fn plus_millis(self, ms: i64) -> Self {
+        Self(self.0.saturating_add(ms))
+    }
+
     /// Whole and fractional days from `earlier` to `self`; negative if `earlier` is later.
     pub fn days_since(self, earlier: Timestamp) -> f64 {
         (self.0 - earlier.0) as f64 / MS_PER_DAY as f64

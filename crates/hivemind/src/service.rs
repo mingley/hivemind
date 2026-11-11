@@ -68,6 +68,10 @@ impl Service {
             "invalidate" => self.invalidate(params),
             "link" => self.link(params),
             "feedback" => self.feedback(params),
+            "lease_acquire" => self.lease_acquire(params),
+            "lease_renew" => self.lease_renew(params),
+            "lease_release" => self.lease_release(params),
+            "lease_show" => self.lease_show(params),
             "changes_since" => self.changes_since(params),
             "stats" => Ok(serde_json::to_value(self.store.stats())?),
             other => Err(anyhow!("unknown method `{other}`")),
@@ -224,6 +228,50 @@ impl Service {
         Ok(serde_json::to_value(receipt)?)
     }
 
+    fn lease_acquire(&self, params: Value) -> Result<Value> {
+        let p: LeaseAcquireParams = serde_json::from_value(params)?;
+        let actor = self.actor_from(&p.actor);
+        let receipt = self.store.acquire_lease(
+            &actor,
+            &p.work_item,
+            Duration::from_secs(p.ttl_secs.unwrap_or(3600)),
+            p.note.as_deref(),
+        )?;
+        Ok(serde_json::to_value(receipt)?)
+    }
+
+    fn lease_renew(&self, params: Value) -> Result<Value> {
+        let p: LeaseRenewParams = serde_json::from_value(params)?;
+        let actor = self.actor_from(&p.actor);
+        let receipt = self.store.renew_lease(
+            &actor,
+            &p.work_item,
+            p.token,
+            Duration::from_secs(p.ttl_secs.unwrap_or(3600)),
+        )?;
+        Ok(serde_json::to_value(receipt)?)
+    }
+
+    fn lease_release(&self, params: Value) -> Result<Value> {
+        let p: LeaseReleaseParams = serde_json::from_value(params)?;
+        let actor = self.actor_from(&p.actor);
+        let receipt = self.store.release_lease(&actor, &p.work_item, p.token)?;
+        Ok(serde_json::to_value(receipt)?)
+    }
+
+    fn lease_show(&self, params: Value) -> Result<Value> {
+        let p: LeaseShowParams = serde_json::from_value(params)?;
+        if let Some(id) = p.work_item {
+            let lease = self
+                .store
+                .lease(&id)
+                .ok_or_else(|| anyhow!("no lease for `{id}`"))?;
+            Ok(serde_json::to_value(lease)?)
+        } else {
+            Ok(serde_json::to_value(self.store.leases())?)
+        }
+    }
+
     fn changes_since(&self, params: Value) -> Result<Value> {
         let p: ChangesParams = serde_json::from_value(params)?;
         let claims = p
@@ -343,6 +391,37 @@ struct FeedbackParams {
     idempotency_key: Option<String>,
     #[serde(default)]
     actor: ActorParams,
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaseAcquireParams {
+    work_item: String,
+    ttl_secs: Option<u64>,
+    note: Option<String>,
+    #[serde(default)]
+    actor: ActorParams,
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaseRenewParams {
+    work_item: String,
+    token: u64,
+    ttl_secs: Option<u64>,
+    #[serde(default)]
+    actor: ActorParams,
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaseReleaseParams {
+    work_item: String,
+    token: u64,
+    #[serde(default)]
+    actor: ActorParams,
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaseShowParams {
+    work_item: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

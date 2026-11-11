@@ -74,6 +74,9 @@ enum Command {
     Link(LinkArgs),
     /// Report how a claim worked out.
     Feedback(FeedbackArgs),
+    /// Acquire, renew, release, or list leases with fencing tokens.
+    #[command(subcommand)]
+    Lease(LeaseCmd),
     /// Store a file (or `-` for stdin) as an artifact and print its hash.
     Put(PutArgs),
     /// Print an artifact's bytes.
@@ -281,6 +284,47 @@ struct FeedbackArgs {
     idempotency_key: Option<String>,
 }
 
+#[derive(Subcommand, Debug)]
+enum LeaseCmd {
+    /// Take an exclusive lease; prints the fencing token.
+    Acquire(LeaseAcquireArgs),
+    /// Extend a held lease (token required).
+    Renew(LeaseRenewArgs),
+    /// Release a held lease (token required).
+    Release(LeaseReleaseArgs),
+    /// Show one lease or list all.
+    Show {
+        /// Work item id [default: list all].
+        work_item: Option<String>,
+    },
+}
+
+#[derive(Args, Debug)]
+struct LeaseAcquireArgs {
+    /// Work item id, such as wi:parser or issue:42.
+    work_item: String,
+    /// Lease lifetime in seconds [default: 3600].
+    #[arg(long, default_value_t = 3600)]
+    ttl_secs: u64,
+    #[arg(long)]
+    note: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct LeaseRenewArgs {
+    work_item: String,
+    /// Fencing token from acquire/renew.
+    token: u64,
+    #[arg(long, default_value_t = 3600)]
+    ttl_secs: u64,
+}
+
+#[derive(Args, Debug)]
+struct LeaseReleaseArgs {
+    work_item: String,
+    token: u64,
+}
+
 #[derive(Args, Debug)]
 struct PutArgs {
     /// File to store, or `-` for stdin.
@@ -468,6 +512,7 @@ fn run(cli: Cli) -> Result<()> {
             )?;
             out.receipt(&receipt, "recorded feedback")
         }
+        Command::Lease(cmd) => run_lease(store, &actor, cmd, &out),
         Command::Put(args) => {
             let (bytes, default_name) = if args.file == Path::new("-") {
                 let mut bytes = Vec::new();
@@ -727,6 +772,50 @@ fn run_via_daemon(
                 Ok(())
             }
         }
+        Command::Lease(cmd) => match cmd {
+            LeaseCmd::Acquire(args) => {
+                let params = json!({
+                    "work_item": args.work_item,
+                    "ttl_secs": args.ttl_secs,
+                    "note": args.note,
+                    "actor": actor_params,
+                });
+                let result = backend
+                    .call_daemon("lease_acquire", params)?
+                    .expect("daemon backend");
+                print_lease_json(&out, &result)
+            }
+            LeaseCmd::Renew(args) => {
+                let params = json!({
+                    "work_item": args.work_item,
+                    "token": args.token,
+                    "ttl_secs": args.ttl_secs,
+                    "actor": actor_params,
+                });
+                let result = backend
+                    .call_daemon("lease_renew", params)?
+                    .expect("daemon backend");
+                print_lease_json(&out, &result)
+            }
+            LeaseCmd::Release(args) => {
+                let params = json!({
+                    "work_item": args.work_item,
+                    "token": args.token,
+                    "actor": actor_params,
+                });
+                let result = backend
+                    .call_daemon("lease_release", params)?
+                    .expect("daemon backend");
+                print_lease_json(&out, &result)
+            }
+            LeaseCmd::Show { work_item } => {
+                let params = json!({ "work_item": work_item });
+                let result = backend
+                    .call_daemon("lease_show", params)?
+                    .expect("daemon backend");
+                out.print_json(&result)
+            }
+        },
         Command::Put(_)
         | Command::Cat { .. }
         | Command::Verify
@@ -734,6 +823,109 @@ fn run_via_daemon(
             "this command needs direct store access; stop hivemindd or use a different --dir"
         )),
         Command::Mcp { .. } | Command::Daemon(_) => unreachable!("handled earlier"),
+    }
+}
+
+fn print_lease_json(out: &Output, result: &serde_json::Value) -> Result<()> {
+    if out.json {
+        return out.print_json(result);
+    }
+    let lease = &result["lease"];
+    println!(
+        "lease {} token {} holder {} expires {} active={}",
+        lease["work_item"].as_str().unwrap_or("?"),
+        lease["token"],
+        lease["holder"].as_str().unwrap_or("?"),
+        lease["expires_at"].as_str().unwrap_or("?"),
+        lease["active"]
+    );
+    Ok(())
+}
+
+fn run_lease(store: &Store, actor: &Actor, cmd: LeaseCmd, out: &Output) -> Result<()> {
+    match cmd {
+        LeaseCmd::Acquire(args) => {
+            let receipt = store.acquire_lease(
+                actor,
+                &args.work_item,
+                std::time::Duration::from_secs(args.ttl_secs),
+                args.note.as_deref(),
+            )?;
+            if out.json {
+                out.print_json(&receipt)
+            } else {
+                println!(
+                    "acquired {} token {} expires {}",
+                    receipt.lease.work_item, receipt.lease.token, receipt.lease.expires_at
+                );
+                Ok(())
+            }
+        }
+        LeaseCmd::Renew(args) => {
+            let receipt = store.renew_lease(
+                actor,
+                &args.work_item,
+                args.token,
+                std::time::Duration::from_secs(args.ttl_secs),
+            )?;
+            if out.json {
+                out.print_json(&receipt)
+            } else {
+                println!(
+                    "renewed {} token {} expires {}",
+                    receipt.lease.work_item, receipt.lease.token, receipt.lease.expires_at
+                );
+                Ok(())
+            }
+        }
+        LeaseCmd::Release(args) => {
+            let receipt = store.release_lease(actor, &args.work_item, args.token)?;
+            if out.json {
+                out.print_json(&receipt)
+            } else {
+                println!(
+                    "released {} token {}",
+                    receipt.lease.work_item, receipt.lease.token
+                );
+                Ok(())
+            }
+        }
+        LeaseCmd::Show { work_item } => {
+            if let Some(id) = work_item {
+                let lease = store
+                    .lease(&id)
+                    .ok_or_else(|| anyhow!("no lease for `{id}`"))?;
+                if out.json {
+                    out.print_json(&lease)
+                } else {
+                    println!(
+                        "{} token {} holder {} expires {} active={}",
+                        lease.work_item, lease.token, lease.holder, lease.expires_at, lease.active
+                    );
+                    Ok(())
+                }
+            } else {
+                let leases = store.leases();
+                if out.json {
+                    out.print_json(&leases)
+                } else if leases.is_empty() {
+                    println!("(no leases)");
+                    Ok(())
+                } else {
+                    for lease in leases {
+                        println!(
+                            "{} token {} holder {} expires {} active={}",
+                            lease.work_item,
+                            lease.token,
+                            lease.holder,
+                            lease.expires_at,
+                            lease.active
+                        );
+                    }
+                    Ok(())
+                }
+            }
+        }
     }
 }
 

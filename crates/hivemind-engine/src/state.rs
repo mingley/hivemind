@@ -147,6 +147,27 @@ pub struct ArtifactRow {
     pub by: Arc<str>,
 }
 
+/// Exclusive hold on a work item, with a fencing token.
+#[derive(Clone, Debug, Serialize)]
+pub struct LeaseRow {
+    pub work_item: String,
+    /// Monotonic fencing token; stale writers are rejected.
+    pub token: u64,
+    pub holder: Arc<str>,
+    pub holder_kind: ActorKind,
+    pub acquired_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub released: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl LeaseRow {
+    pub fn is_active(&self, now: Timestamp) -> bool {
+        !self.released && self.expires_at >= now
+    }
+}
+
 /// The original result of an idempotent write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Ack {
@@ -201,6 +222,7 @@ pub struct State {
     pub(crate) edges: Vec<EdgeRow>,
     edges_by_claim: HashMap<ClaimId, Vec<u32>>,
     pub(crate) artifacts: HashMap<BlobHash, ArtifactRow>,
+    pub(crate) leases: HashMap<String, LeaseRow>,
     idempotency: HashMap<(Arc<str>, String), Ack>,
     pub(crate) lexical: LexicalIndex,
     pub(crate) intern: Interner,
@@ -228,6 +250,7 @@ impl State {
             edges: Vec::new(),
             edges_by_claim: HashMap::new(),
             artifacts: HashMap::new(),
+            leases: HashMap::new(),
             idempotency: HashMap::new(),
             lexical: LexicalIndex::with_max_terms(max_terms),
             intern: Interner::default(),
@@ -424,6 +447,42 @@ impl State {
                     by: Arc::clone(&by),
                 });
             }
+            EventBody::LeaseAcquired {
+                work_item,
+                token,
+                expires_at,
+                note,
+            } => {
+                self.leases.insert(
+                    work_item.clone(),
+                    LeaseRow {
+                        work_item: work_item.clone(),
+                        token: *token,
+                        holder: Arc::clone(&by),
+                        holder_kind: event.actor.kind,
+                        acquired_at: at,
+                        expires_at: *expires_at,
+                        released: false,
+                        note: note.clone(),
+                    },
+                );
+            }
+            EventBody::LeaseRenewed {
+                work_item,
+                token,
+                expires_at,
+            } => match self.leases.get_mut(work_item) {
+                Some(lease) if lease.token == *token && !lease.released => {
+                    lease.expires_at = *expires_at;
+                }
+                _ => known = false,
+            },
+            EventBody::LeaseReleased { work_item, token } => match self.leases.get_mut(work_item) {
+                Some(lease) if lease.token == *token && !lease.released => {
+                    lease.released = true;
+                }
+                _ => known = false,
+            },
         }
         if !known {
             self.skipped += 1;

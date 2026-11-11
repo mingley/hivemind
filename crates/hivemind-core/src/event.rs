@@ -151,6 +151,22 @@ pub enum EventBody {
         name: Option<String>,
         origin: Origin,
     },
+    /// Exclusive lease on a work item, with a fencing token.
+    LeaseAcquired {
+        work_item: String,
+        token: u64,
+        expires_at: Timestamp,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// Extends an held lease; token must match the current fence.
+    LeaseRenewed {
+        work_item: String,
+        token: u64,
+        expires_at: Timestamp,
+    },
+    /// Releases a lease; token must match the current fence.
+    LeaseReleased { work_item: String, token: u64 },
 }
 
 impl EventBody {
@@ -163,6 +179,9 @@ impl EventBody {
             EventBody::FeedbackRecorded { .. } => "feedback_recorded",
             EventBody::ArtifactStored { .. } => "artifact_stored",
             EventBody::Recovered { .. } => "recovered",
+            EventBody::LeaseAcquired { .. } => "lease_acquired",
+            EventBody::LeaseRenewed { .. } => "lease_renewed",
+            EventBody::LeaseReleased { .. } => "lease_released",
         }
     }
 
@@ -174,7 +193,11 @@ impl EventBody {
             | EventBody::ClaimRetracted { claim, .. }
             | EventBody::FeedbackRecorded { claim, .. } => Some(*claim),
             EventBody::EdgeAdded { from, .. } => Some(*from),
-            EventBody::ArtifactStored { .. } | EventBody::Recovered { .. } => None,
+            EventBody::ArtifactStored { .. }
+            | EventBody::Recovered { .. }
+            | EventBody::LeaseAcquired { .. }
+            | EventBody::LeaseRenewed { .. }
+            | EventBody::LeaseReleased { .. } => None,
         }
     }
 }

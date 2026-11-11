@@ -29,7 +29,7 @@ use crate::fsutil;
 use crate::lexical::DEFAULT_MAX_TERMS;
 use crate::log::{DEFAULT_SEGMENT_BYTES, Durability, Log, Recovery};
 use crate::recall::{self, Card, ClaimDetail, Query, Recall};
-use crate::state::{ArtifactRow, State};
+use crate::state::{ArtifactRow, LeaseRow, State};
 
 pub const STORE_FORMAT: u32 = 1;
 const MANIFEST: &str = "MANIFEST";
@@ -91,6 +91,44 @@ pub struct Remember {
     /// Active claims this one replaces, in the same event.
     pub supersedes: Vec<ClaimId>,
     pub idempotency_key: Option<String>,
+}
+
+/// Public view of a lease projection.
+#[derive(Clone, Debug, Serialize)]
+pub struct LeaseView {
+    pub work_item: String,
+    pub token: u64,
+    pub holder: String,
+    pub holder_kind: ActorKind,
+    pub acquired_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub released: bool,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl LeaseView {
+    fn from_row(row: &LeaseRow, now: Timestamp) -> Self {
+        Self {
+            work_item: row.work_item.clone(),
+            token: row.token,
+            holder: row.holder.to_string(),
+            holder_kind: row.holder_kind,
+            acquired_at: row.acquired_at,
+            expires_at: row.expires_at,
+            released: row.released,
+            active: row.is_active(now),
+            note: row.note.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LeaseReceipt {
+    pub event: EventId,
+    pub offset: u64,
+    pub lease: LeaseView,
 }
 
 impl Remember {
@@ -307,6 +345,9 @@ impl Store {
             idempotency_key,
         } = request;
         sanitize(&mut data);
+        if data.review_by.is_none() {
+            data.review_by = default_review_by(data.kind, Timestamp::now());
+        }
         data.validate().map_err(|e| Error::Invalid(e.to_string()))?;
         if let Some(kind) = data.strings().into_iter().find_map(hygiene::find_secret) {
             return Err(Error::Secret(kind));
@@ -789,6 +830,139 @@ impl Store {
         Ok(())
     }
 
+    /// Acquire an exclusive lease on `work_item`. Fails if another principal
+    /// still holds an unexpired lease. Returns a fencing token that must be
+    /// presented on renew/release (and optionally on gated writes).
+    pub fn acquire_lease(
+        &self,
+        actor: &Actor,
+        work_item: &str,
+        ttl: std::time::Duration,
+        note: Option<&str>,
+    ) -> Result<LeaseReceipt> {
+        let work_item = clean_work_item(work_item)?;
+        let note = note.map(clean_note).transpose()?.filter(|s| !s.is_empty());
+        let ttl_ms = duration_millis(ttl)?;
+        let receipt = self.commit_event(actor, None, |state| {
+            let now = Timestamp::now();
+            let next_token = match state.leases.get(&work_item) {
+                Some(lease) if lease.is_active(now) && lease.holder.as_ref() != actor.principal => {
+                    return Err(Error::Conflict(format!(
+                        "work item `{work_item}` is held by {} until {} (token {})",
+                        lease.holder,
+                        lease.expires_at.to_rfc3339(),
+                        lease.token
+                    )));
+                }
+                Some(lease) => lease.token.saturating_add(1).max(1),
+                None => 1,
+            };
+            Ok(EventBody::LeaseAcquired {
+                work_item: work_item.clone(),
+                token: next_token,
+                expires_at: now.plus_millis(ttl_ms),
+                note: note.clone(),
+            })
+        })?;
+        let lease = self.lease(&work_item).expect("lease just acquired");
+        Ok(LeaseReceipt {
+            event: receipt.event,
+            offset: receipt.offset,
+            lease,
+        })
+    }
+
+    /// Extend a held lease. The fencing token must match.
+    pub fn renew_lease(
+        &self,
+        actor: &Actor,
+        work_item: &str,
+        token: u64,
+        ttl: std::time::Duration,
+    ) -> Result<LeaseReceipt> {
+        let work_item = clean_work_item(work_item)?;
+        let ttl_ms = duration_millis(ttl)?;
+        let receipt = self.commit_event(actor, None, |state| {
+            let now = Timestamp::now();
+            let lease = state
+                .leases
+                .get(&work_item)
+                .ok_or_else(|| Error::NotFound(format!("no lease for `{work_item}`")))?;
+            check_fence(lease, actor, token, now)?;
+            Ok(EventBody::LeaseRenewed {
+                work_item: work_item.clone(),
+                token,
+                expires_at: now.plus_millis(ttl_ms),
+            })
+        })?;
+        let lease = self.lease(&work_item).expect("lease just renewed");
+        Ok(LeaseReceipt {
+            event: receipt.event,
+            offset: receipt.offset,
+            lease,
+        })
+    }
+
+    /// Release a held lease. The fencing token must match.
+    pub fn release_lease(
+        &self,
+        actor: &Actor,
+        work_item: &str,
+        token: u64,
+    ) -> Result<LeaseReceipt> {
+        let work_item = clean_work_item(work_item)?;
+        let receipt = self.commit_event(actor, None, |state| {
+            let now = Timestamp::now();
+            let lease = state
+                .leases
+                .get(&work_item)
+                .ok_or_else(|| Error::NotFound(format!("no lease for `{work_item}`")))?;
+            check_fence(lease, actor, token, now)?;
+            Ok(EventBody::LeaseReleased {
+                work_item: work_item.clone(),
+                token,
+            })
+        })?;
+        let lease = self.lease(&work_item).expect("lease just released");
+        Ok(LeaseReceipt {
+            event: receipt.event,
+            offset: receipt.offset,
+            lease,
+        })
+    }
+
+    /// Current lease projection for a work item, if any.
+    pub fn lease(&self, work_item: &str) -> Option<LeaseView> {
+        let state = self.state.read();
+        let lease = state.leases.get(work_item)?;
+        Some(LeaseView::from_row(lease, Timestamp::now()))
+    }
+
+    /// List leases (active first). Expired/released rows remain for audit.
+    pub fn leases(&self) -> Vec<LeaseView> {
+        let now = Timestamp::now();
+        let state = self.state.read();
+        let mut rows: Vec<LeaseView> = state
+            .leases
+            .values()
+            .map(|row| LeaseView::from_row(row, now))
+            .collect();
+        rows.sort_by(|a, b| b.active.cmp(&a.active).then(a.work_item.cmp(&b.work_item)));
+        rows
+    }
+
+    /// Rejects a stale fencing token. Used by callers that gate writes on a lease.
+    pub fn check_lease_token(&self, work_item: &str, token: u64, principal: &str) -> Result<()> {
+        let work_item = clean_work_item(work_item)?;
+        let state = self.state.read();
+        let lease = state
+            .leases
+            .get(&work_item)
+            .ok_or_else(|| Error::NotFound(format!("no lease for `{work_item}`")))?;
+        let actor = Actor::agent(principal);
+        check_fence(lease, &actor, token, Timestamp::now())
+    }
+
     pub fn stats(&self) -> Stats {
         let view = self.log.lock().view();
         let state = self.state.read();
@@ -895,6 +1069,68 @@ fn check_actor(actor: &Actor) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn clean_work_item(work_item: &str) -> Result<String> {
+    let work_item = hygiene::strip_invisible(work_item).trim().to_owned();
+    let len = work_item.chars().count();
+    if work_item.is_empty() || len > MAX_KEY_CHARS {
+        return Err(Error::Invalid(format!(
+            "work item ids must be 1-{MAX_KEY_CHARS} characters"
+        )));
+    }
+    Ok(work_item)
+}
+
+fn duration_millis(ttl: Duration) -> Result<i64> {
+    let ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
+    if ms <= 0 {
+        return Err(Error::Invalid("lease TTL must be positive".into()));
+    }
+    Ok(ms)
+}
+
+fn check_fence(lease: &LeaseRow, actor: &Actor, token: u64, now: Timestamp) -> Result<()> {
+    if lease.released {
+        return Err(Error::Conflict(format!(
+            "lease for `{}` is already released (token {})",
+            lease.work_item, lease.token
+        )));
+    }
+    if lease.expires_at < now {
+        return Err(Error::Conflict(format!(
+            "lease for `{}` expired at {} (token {})",
+            lease.work_item,
+            lease.expires_at.to_rfc3339(),
+            lease.token
+        )));
+    }
+    if lease.token != token {
+        return Err(Error::Conflict(format!(
+            "stale fencing token {token} for `{}`; current token is {}",
+            lease.work_item, lease.token
+        )));
+    }
+    if lease.holder.as_ref() != actor.principal {
+        return Err(Error::Conflict(format!(
+            "lease for `{}` is held by {}, not {}",
+            lease.work_item, lease.holder, actor.principal
+        )));
+    }
+    Ok(())
+}
+
+/// Default review-by dates when the writer omits one: handoffs fade quickly;
+/// decisions and preferences do not auto-expire.
+fn default_review_by(kind: ClaimKind, now: Timestamp) -> Option<Timestamp> {
+    match kind {
+        ClaimKind::Handoff => Some(now.plus_days(7)),
+        ClaimKind::Question => Some(now.plus_days(30)),
+        ClaimKind::Fact | ClaimKind::Solution | ClaimKind::Warning | ClaimKind::Procedure => {
+            Some(now.plus_days(180))
+        }
+        ClaimKind::Decision | ClaimKind::Preference => None,
+    }
 }
 
 fn clean_note(note: &str) -> Result<String> {
