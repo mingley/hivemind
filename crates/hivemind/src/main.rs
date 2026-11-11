@@ -515,6 +515,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("artifacts  {}", stats.artifacts);
             println!("entities   {}", stats.entities);
             println!("terms      {}", stats.terms);
+            println!("interned   {}", stats.interned_strings);
             println!(
                 "log        {} segments, {} bytes",
                 stats.log_segments, stats.log_bytes

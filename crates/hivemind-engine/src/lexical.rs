@@ -18,8 +18,9 @@ pub const K1: f32 = 1.2;
 /// BM25 document-length normalization.
 pub const B: f32 = 0.75;
 /// Default dictionary cap: high enough for small and medium stores; the 100k
-/// synthetic bench peaked around 207k terms.
-pub const DEFAULT_MAX_TERMS: usize = 500_000;
+/// synthetic bench peaked around 207k terms, so 250k leaves headroom without
+/// letting adversarial code text grow RSS without bound.
+pub const DEFAULT_MAX_TERMS: usize = 250_000;
 const MAX_TOKEN_CHARS: usize = 64;
 /// Characters that join words into one identifier, path, or version.
 const GLUE: &[char] = &['_', '-', '.', '/', ':', '@', '+', '#', '$', '\\'];

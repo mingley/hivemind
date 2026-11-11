@@ -87,16 +87,17 @@ instructions, and **current code and tests take precedence**.
 - `Store::wait_for_offset(min_offset, timeout) -> Result<()>` **Done.**
 - `Store::changes_since(from, limit, filter) -> Result<Vec<(u64, Event)>>`
   with optional scope / claim / kind filters. **Done.**
-- Cap distinct token types in the lexical dictionary (default 250k). **Done.**
-- Scope names stored as `Arc<str>` (cheap clone toward interning). **Done.**
-- Compact claim projection ("keydir"): keep filter/rank fields in RAM; load
-  full `ClaimData` from the log by offset on demand. *Deferred.*
-- Intern principals and entity keys across projections. *Deferred.*
+- Cap distinct token types in the lexical dictionary (default 250k;
+  `Options.max_terms`). **Done.**
+- Compact claim projection ("keydir"): filter/rank fields + statement cache in
+  RAM; full `ClaimData` loaded from the log by offset for show/detail. **Done.**
+- Intern scopes, principals, and entity keys (`Arc<str>` table in `State`).
+  **Done.**
 
 ## Crate layout
 
 ```text
-crates/hivemind-engine/   # wait/changes APIs (RSS work deferred)
+crates/hivemind-engine/   # wait/changes APIs + RSS mitigations
 crates/hivemind/          # CLI, daemon, MCP, socket client/protocol
   src/main.rs
   src/daemon.rs
@@ -109,8 +110,8 @@ docs/setup-mcp.md         # Claude Code, Codex, Copilot CLI
 
 ## Tests expected
 
-- Engine: wait_for_offset, changes_since filters; existing suite still green.
-  Compact-row / interning / token-cap tests await the deferred RSS work.
+- Engine: wait_for_offset, changes_since filters, compact-row round-trip,
+  interning/token-cap smoke tests; existing suite still green. **Done.**
 - Daemon: two clients share one store; idle exit; lock exclusivity; crash of
   client leaves daemon up.
 - MCP: tools list order; remember→recall→show round trip over stdio (or via

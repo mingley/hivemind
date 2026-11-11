@@ -26,6 +26,7 @@ use crate::blob::BlobStore;
 use crate::codec;
 use crate::error::{Error, Result};
 use crate::fsutil;
+use crate::lexical::DEFAULT_MAX_TERMS;
 use crate::log::{DEFAULT_SEGMENT_BYTES, Durability, Log, Recovery};
 use crate::recall::{self, Card, ClaimDetail, Query, Recall};
 use crate::state::{ArtifactRow, State};
@@ -45,6 +46,9 @@ const MAX_PRINCIPAL_CHARS: usize = 200;
 pub struct Options {
     pub durability: Durability,
     pub segment_bytes: u64,
+    /// Cap on distinct BM25 token types. New rare tokens are dropped once the
+    /// dictionary reaches this size. Defaults to [`DEFAULT_MAX_TERMS`].
+    pub max_terms: usize,
 }
 
 impl Default for Options {
@@ -52,6 +56,7 @@ impl Default for Options {
         Self {
             durability: Durability::Fsync,
             segment_bytes: DEFAULT_SEGMENT_BYTES,
+            max_terms: DEFAULT_MAX_TERMS,
         }
     }
 }
@@ -110,6 +115,8 @@ pub struct Stats {
     pub artifacts: usize,
     pub entities: usize,
     pub terms: usize,
+    /// Distinct strings in the scope/principal/entity interner.
+    pub interned_strings: usize,
     pub log_segments: usize,
     pub log_bytes: u64,
     pub skipped_events: u64,
@@ -146,7 +153,7 @@ impl ChangesFilter {
             let Some(row) = &row else {
                 return false;
             };
-            if !scopes.iter().any(|s| s == &row.data.scope) {
+            if !scopes.iter().any(|s| s == &row.scope) {
                 return false;
             }
         }
@@ -162,7 +169,7 @@ impl ChangesFilter {
             let Some(row) = &row else {
                 return false;
             };
-            if !kinds.iter().any(|k| k == &row.data.kind) {
+            if !kinds.iter().any(|k| k == &row.kind) {
                 return false;
             }
         }
@@ -206,7 +213,7 @@ impl Store {
         }
         let sync = options.durability == Durability::Fsync;
         let existing = read_manifest(&dir)?;
-        let mut state = State::default();
+        let mut state = State::new(options.max_terms);
         let (log, recovery) = Log::open(
             &dir.join("log"),
             options.durability,
@@ -305,6 +312,7 @@ impl Store {
             return Err(Error::Secret(kind));
         }
         let claim = ClaimId::generate();
+        let statement = data.statement.clone();
         let receipt = self
             .commit(actor, idempotency_key, |state| {
                 let mut seen = BTreeSet::new();
@@ -340,7 +348,7 @@ impl Store {
         if receipt.replayed {
             return Ok(receipt);
         }
-        let similar = self.similar(claim, &supersedes);
+        let similar = self.similar(claim, &supersedes, &statement);
         Ok(Receipt { similar, ..receipt })
     }
 
@@ -582,12 +590,12 @@ impl Store {
         }))
     }
 
-    fn similar(&self, claim: ClaimId, exclude: &[ClaimId]) -> Vec<Card> {
+    fn similar(&self, claim: ClaimId, exclude: &[ClaimId], statement: &str) -> Vec<Card> {
         let state = self.state.read();
         let Some(row) = state.row(&claim) else {
             return Vec::new();
         };
-        let hits = state.lexical.search(&row.data.statement);
+        let hits = state.lexical.search(statement);
         let own = hits
             .iter()
             .find(|(doc, _)| *doc == row.doc)
@@ -602,7 +610,7 @@ impl Store {
                 *doc != row.doc
                     && score / own >= SIMILARITY_THRESHOLD
                     && other.status == Status::Active
-                    && other.data.scope == row.data.scope
+                    && other.scope == row.scope
                     && !exclude.contains(&other.id)
             })
             .collect();
@@ -614,11 +622,39 @@ impl Store {
             .map(|(doc, score)| {
                 let other = &state.claims[doc as usize];
                 // Compare conditions: a similar claim under other conditions shows as a mismatch.
-                let applies =
-                    applicability::evaluate(&other.data.applies_when, &row.data.applies_when);
+                let applies = applicability::evaluate(&other.applies_when, &row.applies_when);
                 recall::card(&state, other, score / own, applies, now)
             })
             .collect()
+    }
+
+    /// Loads the full [`ClaimData`] for a claim from its log offset.
+    pub(crate) fn load_claim_data(&self, offset: u64) -> Result<ClaimData> {
+        let view = self.log.lock().view();
+        let rows = view.read(offset, 1)?;
+        let Some((got, bytes)) = rows.into_iter().next() else {
+            return Err(Error::corruption(
+                self.dir.join("log"),
+                offset,
+                format!("no event at offset {offset}"),
+            ));
+        };
+        if got != offset {
+            return Err(Error::corruption(
+                self.dir.join("log"),
+                offset,
+                format!("expected offset {offset}, read {got}"),
+            ));
+        }
+        let event = codec::decode(offset, &bytes)?;
+        match event.body {
+            EventBody::ClaimAsserted { data, .. } => Ok(*data),
+            _ => Err(Error::corruption(
+                self.dir.join("log"),
+                offset,
+                format!("offset {offset} is not a ClaimAsserted event"),
+            )),
+        }
     }
 
     // ----- reads --------------------------------------------------------
@@ -628,11 +664,17 @@ impl Store {
     }
 
     /// The full (L1) view of a claim. With a context, applicability is evaluated too.
+    /// Reloads the claim body from the log by the keydir offset.
     pub fn get(&self, id: &ClaimId, context: Option<&Context>) -> Option<ClaimDetail> {
+        let (offset, _) = {
+            let state = self.state.read();
+            let row = state.row(id)?;
+            (row.offset, row.id)
+        };
+        let data = self.load_claim_data(offset).ok()?;
         let state = self.state.read();
-        state
-            .row(id)
-            .map(|row| recall::detail(&state, row, context))
+        let row = state.row(id)?;
+        Some(recall::detail(&state, row, &data, context))
     }
 
     /// Resolves a full claim ID or a unique prefix of at least 4 hex digits.
@@ -739,7 +781,7 @@ impl Store {
         let mut by_kind = BTreeMap::new();
         for row in state.claims() {
             *by_status.entry(row.status.to_string()).or_insert(0) += 1;
-            *by_kind.entry(row.data.kind.to_string()).or_insert(0) += 1;
+            *by_kind.entry(row.kind.to_string()).or_insert(0) += 1;
         }
         Stats {
             store_id: self.manifest.store_id.clone(),
@@ -752,6 +794,7 @@ impl Store {
             artifacts: state.artifacts.len(),
             entities: state.by_entity.len(),
             terms: state.lexical.terms(),
+            interned_strings: state.intern.len(),
             log_segments: view.segment_count(),
             log_bytes: view.bytes(),
             skipped_events: state.skipped,

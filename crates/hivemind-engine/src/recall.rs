@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use hivemind_core::applicability::{self, Applicability, Context};
 use hivemind_core::{
-    Actor, ClaimId, ClaimKind, EventId, Provenance, Scope, Status, Timestamp, TrustTier,
+    Actor, ClaimData, ClaimId, ClaimKind, EventId, Provenance, Scope, Status, Timestamp, TrustTier,
     Verification,
 };
 use serde::Serialize;
@@ -20,7 +20,6 @@ pub const DEFAULT_LIMIT: usize = 8;
 pub const DEFAULT_BUDGET_TOKENS: usize = 1_200;
 /// Name of the ranking heuristics below. Tuned by experiments F4 and F5.
 pub const RANKING_POLICY: &str = "rank-v0";
-const CARD_STATEMENT_CHARS: usize = 280;
 const EDGE_STATEMENT_CHARS: usize = 120;
 
 #[derive(Clone, Debug, Default)]
@@ -180,19 +179,24 @@ pub(crate) fn recall(state: &State, query: &Query) -> Recall {
     let mut ranked: Vec<(u32, f32, Applicability)> = Vec::new();
     for (doc, base) in candidates {
         let row = &state.claims[doc as usize];
-        if !query.scopes.is_empty() && !query.scopes.contains(&row.data.scope) {
+        if !query.scopes.is_empty() && !query.scopes.contains(&row.scope) {
             continue;
         }
-        if !query.kinds.is_empty() && !query.kinds.contains(&row.data.kind) {
+        if !query.kinds.is_empty() && !query.kinds.contains(&row.kind) {
             continue;
         }
-        if !query.about.is_empty() && !row.data.about.iter().any(|a| query.about.contains(a)) {
+        if !query.about.is_empty()
+            && !row
+                .about
+                .iter()
+                .any(|a| query.about.iter().any(|q| q.as_str() == a.as_ref()))
+        {
             continue;
         }
         if row.status != Status::Active && !query.include_history {
             continue;
         }
-        let applicability = applicability::evaluate(&row.data.applies_when, &query.context);
+        let applicability = applicability::evaluate(&row.applies_when, &query.context);
         if applicability.is_mismatch() && !query.include_inapplicable {
             continue;
         }
@@ -259,7 +263,7 @@ fn row_multiplier(row: &ClaimRow, applicability: &Applicability, now: Timestamp)
         Applicability::Unknown { .. } => 0.85,
         Applicability::Mismatch { .. } => 0.3,
     };
-    if let Some(half_life) = half_life_days(row.data.kind) {
+    if let Some(half_life) = half_life_days(row.kind) {
         let age = now.days_since(row.recorded_at).max(0.0);
         m *= 0.75 + 0.25 * 0.5f64.powf(age / half_life) as f32;
     }
@@ -321,22 +325,22 @@ fn card_with_prior(
     if is_expired(row, now) {
         flags.push(Flag::Expired);
     }
-    let (statement, truncated) = truncate(&row.data.statement, CARD_STATEMENT_CHARS);
-    if truncated {
+    let statement = row.statement_cache.clone();
+    if row.statement_truncated {
         flags.push(Flag::Truncated);
     }
     Card {
         id: row.id,
-        kind: row.data.kind,
+        kind: row.kind,
         status: row.status,
         verification: belief.verification,
         trust: belief.trust,
-        scope: row.data.scope.clone(),
+        scope: row.scope.clone(),
         recorded_at: row.recorded_at,
         applicability,
         statement,
-        evidence: row.data.provenance.evidence.len(),
-        citations: row.data.provenance.citations.len(),
+        evidence: row.evidence_count,
+        citations: row.citations_count,
         flags,
         superseded_by: row.superseded_by,
         conflicts_with: belief.conflicts,
@@ -344,7 +348,12 @@ fn card_with_prior(
     }
 }
 
-pub(crate) fn detail(state: &State, row: &ClaimRow, context: Option<&Context>) -> ClaimDetail {
+pub(crate) fn detail(
+    state: &State,
+    row: &ClaimRow,
+    data: &ClaimData,
+    context: Option<&Context>,
+) -> ClaimDetail {
     let edges = state
         .edges_of(&row.id)
         .map(|edge| {
@@ -355,7 +364,7 @@ pub(crate) fn detail(state: &State, row: &ClaimRow, context: Option<&Context>) -
             };
             let other_statement = state
                 .row(&other)
-                .map(|o| truncate(&o.data.statement, EDGE_STATEMENT_CHARS).0)
+                .map(|o| truncate(&o.statement_cache, EDGE_STATEMENT_CHARS).0)
                 .unwrap_or_default();
             EdgeView {
                 direction,
@@ -364,27 +373,27 @@ pub(crate) fn detail(state: &State, row: &ClaimRow, context: Option<&Context>) -
                 other_statement,
                 note: edge.note.clone(),
                 evidence: edge.evidence.len(),
-                by: edge.by.clone(),
+                by: edge.by.to_string(),
                 recorded_at: edge.recorded_at,
             }
         })
         .collect();
     ClaimDetail {
         id: row.id,
-        kind: row.data.kind,
+        kind: row.kind,
         status: row.status,
         belief: state.belief(row),
-        statement: row.data.statement.clone(),
-        scope: row.data.scope.clone(),
-        about: row.data.about.clone(),
-        payload: row.data.payload.clone(),
-        applies_when: row.data.applies_when.clone(),
-        applicability: context.map(|ctx| applicability::evaluate(&row.data.applies_when, ctx)),
-        valid_from: row.data.valid_from,
-        valid_to: row.data.valid_to,
-        review_by: row.data.review_by,
-        provenance: row.data.provenance.clone(),
-        author: row.author.clone(),
+        statement: data.statement.clone(),
+        scope: row.scope.clone(),
+        about: data.about.clone(),
+        payload: data.payload.clone(),
+        applies_when: data.applies_when.clone(),
+        applicability: context.map(|ctx| applicability::evaluate(&data.applies_when, ctx)),
+        valid_from: data.valid_from,
+        valid_to: data.valid_to,
+        review_by: data.review_by,
+        provenance: data.provenance.clone(),
+        author: row.author(),
         recorded_at: row.recorded_at,
         offset: row.offset,
         event: row.event,
@@ -413,7 +422,7 @@ fn half_life_days(kind: ClaimKind) -> Option<f64> {
 }
 
 fn is_expired(row: &ClaimRow, now: Timestamp) -> bool {
-    match row.data.review_by {
+    match row.review_by {
         Some(review_by) if now > review_by => row.last_validated_at.is_none_or(|v| v < review_by),
         _ => false,
     }
