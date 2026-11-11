@@ -120,7 +120,7 @@ pub fn append_pulled_events(store_dir: &Path, events: &[Value]) -> Result<PathBu
 }
 
 /// Parse `Authorization: Bearer <token>`.
-pub fn bearer_token<'a>(header: Option<&'a str>) -> Result<&'a str> {
+pub fn bearer_token(header: Option<&str>) -> Result<&str> {
     let Some(header) = header else {
         bail!("missing Authorization header");
     };
