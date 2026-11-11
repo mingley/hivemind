@@ -344,6 +344,11 @@ impl LogView {
     pub fn segment_count(&self) -> usize {
         self.segments.len()
     }
+
+    /// Base offsets of every segment file in this view (including the active one).
+    pub fn segment_bases(&self) -> &[u64] {
+        &self.segments
+    }
 }
 
 fn segment_path(dir: &Path, base: u64) -> PathBuf {

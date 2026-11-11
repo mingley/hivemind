@@ -102,12 +102,44 @@ enum Command {
     },
     /// Run the store daemon in the foreground (same as `hivemindd`).
     Daemon(hivemind::daemon::DaemonArgs),
+    /// Run the shared HTTP service (tenant partitions + bearer auth).
+    Serve(ServeArgs),
+    /// Copy durable log segments to a backup directory.
+    Backup(BackupArgs),
     /// Append claims in a loop, printing each acknowledged offset (crash testing).
     #[command(hide = true)]
     DebugWriteLoop {
         #[arg(long)]
         count: Option<u64>,
     },
+}
+
+#[derive(Args, Debug)]
+struct ServeArgs {
+    /// Root directory holding `tenants/<id>/` partitions [default: ~/.hivemind].
+    #[arg(long, env = "HIVEMIND_ROOT")]
+    root: Option<PathBuf>,
+    /// Listen address.
+    #[arg(long, default_value = "127.0.0.1:8787")]
+    listen: String,
+    /// Bearer token required on every request except `/health`.
+    #[arg(long, env = "HIVEMIND_TOKEN")]
+    token: String,
+    /// Skip fsync (tests only).
+    #[arg(long, hide = true)]
+    no_fsync: bool,
+}
+
+#[derive(Args, Debug)]
+struct BackupArgs {
+    /// Destination directory for shipped segments.
+    dest: PathBuf,
+    /// Tenant id when using a multi-tenant root (writes under root/tenants/<id>).
+    #[arg(long)]
+    tenant: Option<String>,
+    /// Multi-tenant root [default: ~/.hivemind]. Used with --tenant.
+    #[arg(long, env = "HIVEMIND_ROOT")]
+    root: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -419,6 +451,58 @@ fn run(cli: Cli) -> Result<()> {
             }
             return hivemind::daemon::run(args);
         }
+        Command::Serve(args) => {
+            let root = match &args.root {
+                Some(r) => r.clone(),
+                None => default_root()?,
+            };
+            let listen: std::net::SocketAddr = args
+                .listen
+                .parse()
+                .with_context(|| format!("invalid --listen {}", args.listen))?;
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(hivemind::http::serve(hivemind::http::ServeArgs {
+                root,
+                listen,
+                token: args.token.clone(),
+                no_fsync: args.no_fsync || cli.no_fsync,
+            }));
+        }
+        Command::Backup(args) => {
+            let store_dir = if let Some(tenant) = &args.tenant {
+                let root = match &args.root {
+                    Some(r) => r.clone(),
+                    None => default_root()?,
+                };
+                hivemind::tenant::ensure_tenant_dir(&root, tenant)?
+            } else {
+                dir.clone()
+            };
+            let durability = if cli.no_fsync {
+                hivemind_engine::Durability::NoFsync
+            } else {
+                hivemind_engine::Durability::Fsync
+            };
+            let store = Store::open(
+                &store_dir,
+                hivemind_engine::Options {
+                    durability,
+                    ..hivemind_engine::Options::default()
+                },
+            )?;
+            let report = store.backup_segments(&args.dest)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "backed up {} segments (next_offset {}) to {}",
+                    report.segments,
+                    report.next_offset,
+                    report.dest.display()
+                );
+            }
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -633,7 +717,9 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::DebugWriteLoop { count } => debug_write_loop(store, &actor, count),
-        Command::Mcp { .. } | Command::Daemon(_) => unreachable!("handled before opening store"),
+        Command::Mcp { .. } | Command::Daemon(_) | Command::Serve(_) | Command::Backup(_) => {
+            unreachable!("handled before opening store")
+        }
     }
 }
 
@@ -852,7 +938,9 @@ fn run_via_daemon(
         | Command::Put(_)
         | Command::Cat { .. }
         | Command::Verify
-        | Command::DebugWriteLoop { .. } => Err(anyhow!(
+        | Command::DebugWriteLoop { .. }
+        | Command::Serve(_)
+        | Command::Backup(_) => Err(anyhow!(
             "this command needs direct store access; stop hivemindd or use a different --dir"
         )),
         Command::Mcp { .. } | Command::Daemon(_) => unreachable!("handled earlier"),
@@ -1049,6 +1137,11 @@ fn daemon_receipt(out: &Output, result: &serde_json::Value, verb: &str) -> Resul
 fn default_dir() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("set HOME or pass --dir"))?;
     Ok(PathBuf::from(home).join(".hivemind").join("store"))
+}
+
+fn default_root() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("set HOME or pass --root"))?;
+    Ok(PathBuf::from(home).join(".hivemind"))
 }
 
 fn actor(cli: &Cli) -> Actor {

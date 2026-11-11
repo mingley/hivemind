@@ -133,6 +133,16 @@ pub struct LeaseReceipt {
     pub lease: LeaseView,
 }
 
+/// Result of [`Store::backup_segments`].
+#[derive(Clone, Debug, Serialize)]
+pub struct BackupReport {
+    pub store_id: String,
+    pub segments: usize,
+    pub segment_bases: Vec<u64>,
+    pub next_offset: u64,
+    pub dest: PathBuf,
+}
+
 impl Remember {
     pub fn new(data: ClaimData) -> Self {
         Self {
@@ -446,6 +456,36 @@ impl Store {
 
     pub fn vector_count(&self) -> usize {
         self.state.read().vectors.len()
+    }
+
+    /// Copy durable log segments (and MANIFEST) to `dest` for cold backup / shipping.
+    /// Returns the number of segment files copied. The active segment is included;
+    /// callers that want only sealed segments can filter by comparing sizes later.
+    pub fn backup_segments(&self, dest: &Path) -> Result<BackupReport> {
+        fs::create_dir_all(dest)?;
+        let log_src = self.dir.join("log");
+        let log_dst = dest.join("log");
+        fs::create_dir_all(&log_dst)?;
+        let view = self.log.lock().view();
+        let mut segments = Vec::new();
+        for &base in view.segment_bases() {
+            let name = format!("{base:020}.hlog");
+            let from = log_src.join(&name);
+            let to = log_dst.join(&name);
+            fs::copy(&from, &to)?;
+            segments.push(base);
+        }
+        let manifest_src = self.dir.join(MANIFEST);
+        if manifest_src.exists() {
+            fs::copy(&manifest_src, dest.join(MANIFEST))?;
+        }
+        Ok(BackupReport {
+            store_id: self.manifest.store_id.clone(),
+            segments: segments.len(),
+            segment_bases: segments,
+            next_offset: view.end(),
+            dest: dest.to_path_buf(),
+        })
     }
 
     /// Rebuild all vectors from claim statement caches using the current embedder.
