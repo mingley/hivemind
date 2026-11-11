@@ -1,0 +1,9 @@
+- actor: "agent:claude-code/laptop-a/session-100"
+  summary: "Early prototype preference: use print for logging in scripts."
+  branch: main
+- actor: "human:maintainer"
+  summary: Migrated all modules to logging.getLogger; added lint forbid print in src/.
+  branch: main
+- actor: "agent:codex/laptop-b/session-101"
+  summary: Adding refund notification feature under src/notify.py.
+  branch: feat/refund-notify

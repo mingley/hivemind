@@ -1,0 +1,31 @@
+- id: gold-05-macos-libpq
+  kind: procedure
+  scope: project:acme/analytics
+  statement: 'On macOS ARM, pip install psycopg needs Homebrew libpq: brew install
+    libpq, then put PG_CONFIG and PATH on Homebrew libpq binaries before pip install.'
+  about:
+  - repo:acme/analytics
+  - pkg:pypi/psycopg
+  - tool:homebrew/libpq
+  when:
+    os: macos
+    arch: arm64
+  fields:
+    error_signature: 'Error: pg_config executable not found'
+    steps: brew install libpq; export PATH="$(brew --prefix libpq)/bin:$PATH"; export
+      PG_CONFIG="$(brew --prefix libpq)/bin/pg_config"; pip install psycopg
+  status: active
+- id: gold-05-linux-note
+  kind: procedure
+  scope: project:acme/analytics
+  statement: 'On Debian/Ubuntu CI, install libpq via apt: sudo apt-get install -y
+    libpq-dev before pip install psycopg.'
+  about:
+  - repo:acme/analytics
+  - pkg:pypi/psycopg
+  when:
+    os: linux
+  fields:
+    distro: debian
+    steps: sudo apt-get install -y libpq-dev
+  status: active

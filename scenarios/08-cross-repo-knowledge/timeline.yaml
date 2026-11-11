@@ -1,0 +1,6 @@
+- actor: "agent:claude-code/laptop-a/session-70"
+  summary: Documented X-Tenant required header in tenant-svc handler; missing header → 400.
+  branch: main
+- actor: "agent:codex/laptop-b/session-71"
+  summary: Adding new list_widgets() call in client-sdk against tenant-svc.
+  branch: feat/list-widgets

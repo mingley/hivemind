@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/hivemind-core", "crates/hivemind-engine", "crates/hivemind"]
+members = ["crates/hivemind-core", "crates/hivemind-engine", "crates/hivemind", "crates/hivebench"]
 
 [workspace.package]
 version = "0.1.0"

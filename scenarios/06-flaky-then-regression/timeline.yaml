@@ -1,0 +1,9 @@
+- actor: "agent:claude-code/laptop-a/session-50"
+  summary: "test_sync failed ~1/5 locally; diagnosed race on shared buffer; quarantined and filed issue #123."
+  branch: main
+- actor: "human:maintainer"
+  summary: "Fixed race with lock around buffer swap; commit f1xrace; removed quarantine; issue #123 closed."
+  branch: main
+- actor: "agent:codex/ci/session-51"
+  summary: "After merge of bad change, test_sync fails every run with AssertionError on checksum mismatch."
+  branch: main

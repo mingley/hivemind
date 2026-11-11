@@ -1,0 +1,9 @@
+- actor: "agent:claude-code/macos-m2/session-40"
+  summary: pip install psycopg failed building from source; brew install libpq and export PATH/PG_CONFIG fixed it.
+  branch: main
+- actor: "agent:codex/linux-ci/session-41"
+  summary: Fresh Linux CI image setting up acme/analytics Python deps.
+  branch: main
+- actor: "agent:claude-code/macos-m3/session-42"
+  summary: New macOS laptop cloning acme/analytics; pip install failing on psycopg.
+  branch: main

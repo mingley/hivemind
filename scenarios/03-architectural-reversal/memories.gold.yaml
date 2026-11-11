@@ -1,0 +1,31 @@
+- id: gold-03-adr1
+  kind: decision
+  scope: project:acme/shop
+  statement: Modules communicate via an in-process event bus; publishers emit domain
+    events, subscribers mutate local state.
+  about:
+  - repo:acme/shop
+  - adr:0001-event-bus
+  - entity:event-bus
+  when: {}
+  fields:
+    adr: docs/adr/0001-event-bus.md
+    rationale: decouple inventory from orders
+    status_note: superseded by ADR-2
+  status: superseded
+- id: gold-03-adr2
+  kind: decision
+  scope: project:acme/shop
+  statement: Modules should call each other directly; the in-process event bus is
+    retired for synchronous domain flows (ADR-2 supersedes ADR-1).
+  about:
+  - repo:acme/shop
+  - adr:0002-direct-calls
+  - entity:module-boundaries
+  when: {}
+  fields:
+    adr: docs/adr/0002-direct-calls.md
+    supersedes: gold-03-adr1
+    pattern: orders.service.place_order -> inventory.service.reserve
+    rationale: event bus hid call graphs and made transactions awkward
+  status: active

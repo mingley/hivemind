@@ -1,0 +1,11 @@
+- id: dist-03-kafka
+  kind: decision
+  scope: project:acme/shop
+  statement: Use Kafka for cross-service integration with the warehouse partner —
+    not for in-process module calls.
+  about:
+  - entity:warehouse-partner
+  when: {}
+  fields:
+    boundary: cross-service
+  status: active

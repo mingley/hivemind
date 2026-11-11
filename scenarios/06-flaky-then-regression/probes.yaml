@@ -1,0 +1,19 @@
+- id: probe-06-not-flaky
+  query: test_sync failing AssertionError checksum mismatch is this still the known
+    flake
+  ctx:
+    project: acme/syncer
+    branch: main
+    error: 'AssertionError: checksum mismatch'
+  expect:
+    claim_ids:
+    - gold-06-race-fixed
+- id: probe-06-history-flake
+  query: history of test_sync flaky quarantine
+  ctx:
+    project: acme/syncer
+  expect:
+    claim_ids:
+    - gold-06-race-fixed
+    - gold-06-flaky
+  include_history: true

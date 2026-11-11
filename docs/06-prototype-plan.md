@@ -1,6 +1,6 @@
 # 06: Build plan, milestones, and open questions
 
-Status: v0.4 (2026-11-11). M0 and M1 are done; M2 is next. Written after the
+Status: v0.5 (2026-11-11). M0–M2 are done; M3 is next. Written after the
 build decision ([04](04-architecture-and-decisions.md#decision-summary)). Each
 milestone ends with something usable, a test or benchmark that would expose
 failure, and an explicit list of what it does **not** prove.
@@ -117,7 +117,7 @@ change until then):
 - Group commit across concurrent writers through a single writer thread
   (daemon path lands in M1; explicit batching channel still optional).
 - Guard free disk space before `ENOSPC`. Sweep stray temporary blob files at
-  open.
+  open. **Done** (`Error::DiskFull`; `blobs/tmp/` swept on open).
 - Crash testing beyond `kill -9`:
   - a simulated filesystem with seeded crash schedules (evaluate
     `turmoil-fs`);
@@ -172,6 +172,25 @@ target is met.
 
 Working notes that guided the implementation are kept as historical in
 [m1-implementation-notes.md](m1-implementation-notes.md).
+
+## M2 status: evaluation harness (done 2026-11-11)
+
+**Built:**
+
+- **`crates/hivebench`:** scenario loader/validator, offline E-R metrics
+  (Recall@k, stale-hit rate, abstention, applicability precision), baselines
+  B0 / B1b / B1c / B2 / Oracle / Hivemind, dry-run harness with a token
+  ledger stub (`docs/05` categories).
+- **`scenarios/`:** twelve seed families from
+  [research/04 §9](../research/04-coding-agent-memory-practice.md#9-evaluation-seed-scenarios)
+  (`01`–`12`), with timeline, gold memories, distractors, and probes.
+- **CLI:** `hivebench list|validate|er|dry-run`.
+
+**What this proves / does not prove:** offline lexical retrieval quality and
+baseline plumbing for F1–F4-style work. It does not run paid LLM agent loops,
+Tier C coding leaderboards, or earned-memories write-path experiments yet.
+
+Working notes: [m2-implementation-notes.md](m2-implementation-notes.md).
 
 ## Open questions
 

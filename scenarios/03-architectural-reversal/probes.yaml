@@ -1,0 +1,17 @@
+- id: probe-03-current-pattern
+  query: how should orders notify inventory when placing an order
+  ctx:
+    project: acme/shop
+    branch: main
+  expect:
+    claim_ids:
+    - gold-03-adr2
+- id: probe-03-history
+  query: history of inter-module communication decision event bus vs direct calls
+  ctx:
+    project: acme/shop
+  expect:
+    claim_ids:
+    - gold-03-adr2
+    - gold-03-adr1
+  include_history: true

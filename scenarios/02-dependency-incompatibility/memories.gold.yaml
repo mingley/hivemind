@@ -1,0 +1,36 @@
+- id: gold-02-pin
+  kind: warning
+  scope: project:acme/gateway
+  statement: httpx>=0.28 breaks with respx==0.20.2 (TypeError on MockTransport.reset);
+    pin httpx<0.28 until respx>=0.21.
+  about:
+  - repo:acme/gateway
+  - pkg:pypi/httpx
+  - pkg:pypi/respx@0.20.2
+  - err:TypeError/MockTransport.reset
+  when:
+    branch: release/2026.2
+  fields:
+    deps.respx: 0.20.2
+    error_signature: 'TypeError: MockTransport.reset() got an unexpected keyword argument'
+    pin: httpx>=0.27,<0.28
+    upstream_issue: https://github.com/lundberg/respx/issues/280
+    lockfile_citation: poetry.lock:httpx@0.27.2
+  status: superseded
+- id: gold-02-resolved
+  kind: fact
+  scope: project:acme/gateway
+  statement: respx 0.21.0 fixes MockTransport.reset compatibility with httpx 0.28;
+    main may use httpx>=0.28 with respx>=0.21.
+  about:
+  - repo:acme/gateway
+  - pkg:pypi/respx@0.21.0
+  - pkg:pypi/httpx
+  when:
+    branch: main
+  fields:
+    deps.respx: '>=0.21.0'
+    supersedes: gold-02-pin
+    changelog: 'respx 0.21.0: align MockTransport with httpx 0.28'
+    lockfile_citation: poetry.lock:respx@0.21.0,httpx@0.28.1
+  status: active

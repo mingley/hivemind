@@ -1,0 +1,11 @@
+- id: dist-04-old-handoff
+  kind: handoff
+  scope: project:acme/edge
+  statement: WI-200 auth middleware handoff from last month — unrelated closed work.
+  about:
+  - work:WI-200
+  when: {}
+  fields:
+    done: all
+    remaining: none
+  status: expired

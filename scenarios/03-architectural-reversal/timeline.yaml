@@ -1,0 +1,9 @@
+- actor: "human:architect"
+  summary: "Accepted ADR-1: modules communicate via event bus (docs/adr/0001-event-bus.md)."
+  branch: main
+- actor: "agent:claude-code/laptop-a/session-20"
+  summary: Implemented inventory updates via OrderPlaced events on the bus.
+  branch: main
+- actor: "human:architect"
+  summary: "Accepted ADR-2 superseding ADR-1: prefer direct calls; migrated call sites; docs/adr/0002-direct-calls.md."
+  branch: main

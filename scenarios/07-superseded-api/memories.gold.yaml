@@ -1,0 +1,30 @@
+- id: gold-07-old-api
+  kind: preference
+  scope: project:acme/accounts
+  statement: 'Use fetch_user(user_id: str); get_user() is deprecated and will be removed.'
+  about:
+  - sym:fetch_user
+  - sym:get_user
+  - repo:acme/accounts
+  when: {}
+  fields:
+    preferred: 'fetch_user(user_id: str) -> User'
+    deprecated: 'get_user(user_id: str) -> User'
+    citation: src/users.py:40@oldapi01
+  status: superseded
+- id: gold-07-current-api
+  kind: fact
+  scope: project:acme/accounts
+  statement: 'fetch_user now requires tenant and UserId: fetch_user(tenant: str, id:
+    UserId) -> User; get_user was deleted.'
+  about:
+  - sym:fetch_user
+  - repo:acme/accounts
+  when: {}
+  fields:
+    after_commit: newapi02
+    signature: 'fetch_user(tenant: str, id: UserId) -> User'
+    removed: get_user
+    citation: src/users.py:40@newapi02
+    supersedes: gold-07-old-api
+  status: active

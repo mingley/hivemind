@@ -1,0 +1,20 @@
+- id: probe-01-retrieve-fix
+  query: AssertionError assert datetime due_at timezone test_cutoff failing on CI
+  ctx:
+    project: acme/billing
+    os: linux
+    branch: feat/cutoff-reports
+    error: 'AssertionError: assert datetime(2026, 3, 15, 0, 0) == datetime(2026, 3,
+      15, 7, 0, tzinfo=datetime.timezone.utc)'
+  expect:
+    claim_ids:
+    - gold-01-fix
+- id: probe-01-how-to-repro
+  query: how do we reproduce timezone-sensitive pytest failures locally
+  ctx:
+    project: acme/billing
+    os: linux
+  expect:
+    claim_ids:
+    - gold-01-procedure
+    - gold-01-fix

@@ -1,0 +1,9 @@
+- actor: "agent:claude-code/laptop-a/session-10"
+  summary: CI failed after bumping httpx to 0.28.0; isolated TypeError with respx 0.20.2 MockTransport.reset.
+  branch: main
+- actor: "agent:claude-code/laptop-a/session-10"
+  summary: "Pinned httpx<0.28 in pyproject.toml; cited lockfile and https://github.com/lundberg/respx/issues/280."
+  branch: main
+- actor: "human:maintainer"
+  summary: respx 0.21.0 released with MockTransport fix; main lockfile updated to respx==0.21.0 and httpx==0.28.1.
+  branch: main

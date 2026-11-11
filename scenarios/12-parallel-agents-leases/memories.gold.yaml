@@ -1,0 +1,51 @@
+- id: gold-12-lease
+  kind: fact
+  scope: project:acme/protocol
+  statement: worker-1 holds exclusive lease on src/parser.py with fencing token 7
+    and TTL 15m for WI-900; crashed at 2026-11-10T16:02:00Z while editing parse_frame.
+  about:
+  - repo:acme/protocol
+  - file:src/parser.py
+  - work:WI-900
+  - lease:parser.py
+  when:
+    resource: src/parser.py
+  fields:
+    holder: agent:claude-code/worker-1/session-110
+    fencing_token: 7
+    ttl_seconds: 900
+    acquired_at: '2026-11-10T15:55:00Z'
+    crash_at: '2026-11-10T16:02:00Z'
+  status: active
+- id: gold-12-partial
+  kind: handoff
+  scope: project:acme/protocol
+  statement: 'Partial parse_frame rewrite on feat/parse-recover: added CRC check stub;
+    length-prefix decoding incomplete; do not duplicate CRC work after lease reclaim.'
+  about:
+  - file:src/parser.py
+  - sym:parse_frame
+  - work:WI-900
+  when:
+    branch: feat/parse-recover
+  fields:
+    done: CRC stub in parse_frame
+    remaining: finish length-prefix; wire error recovery tests
+    next_step: After lease TTL, reclaim with fencing token >7 and continue length-prefix
+    notification: change feed event on file:src/parser.py
+  status: active
+- id: gold-12-reclaim-policy
+  kind: procedure
+  scope: project:acme/protocol
+  statement: If a parser.py lease holder crashes, wait until TTL elapses, reclaim
+    with a higher fencing token, apply notified partial changes, then continue; never
+    write while fencing token is stale.
+  about:
+  - lease:parser.py
+  - entity:fencing-token
+  when: {}
+  fields:
+    ttl_seconds: 900
+    epsilon_seconds: 30
+    forbid: duplicate CRC implementation
+  status: active

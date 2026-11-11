@@ -1,0 +1,28 @@
+- id: probe-02-main-no-repin
+  query: should we pin httpx below 0.28 because of respx MockTransport errors
+  ctx:
+    project: acme/gateway
+    branch: main
+  expect:
+    claim_ids:
+    - gold-02-resolved
+- id: probe-02-release-branch
+  query: httpx TypeError MockTransport.reset on release branch
+  ctx:
+    project: acme/gateway
+    branch: release/2026.2
+  expect:
+    claim_ids:
+    - gold-02-pin
+  include_history: true
+  include_inapplicable: true
+- id: probe-02-history
+  query: history of httpx respx incompatibility pin
+  ctx:
+    project: acme/gateway
+    branch: main
+  expect:
+    claim_ids:
+    - gold-02-resolved
+    - gold-02-pin
+  include_history: true

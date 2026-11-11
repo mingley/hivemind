@@ -1,0 +1,14 @@
+- id: probe-08-with-access
+  query: what headers does tenant-svc require when listing widgets
+  ctx:
+    project: acme/client-sdk
+  expect:
+    claim_ids:
+    - gold-08-xtenant
+    - gold-08-client-helper
+- id: probe-08-no-access
+  query: what headers does tenant-svc require when listing widgets
+  ctx:
+    project: acme/client-sdk
+  expect:
+    abstain: true

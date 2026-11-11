@@ -1,0 +1,9 @@
+- id: probe-04-resume
+  query: resume WI-441 rate limiter handoff what is left to do
+  ctx:
+    project: acme/edge
+    branch: feat/rate-limit
+  expect:
+    claim_ids:
+    - gold-04-handoff
+    - gold-04-failing-test

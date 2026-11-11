@@ -1,0 +1,10 @@
+- id: dist-06-retry-advice
+  kind: procedure
+  scope: project:acme/syncer
+  statement: If test_sync fails, re-run the job three times before investigating —
+    stale advice from the flaky era.
+  about:
+  - test:tests/test_sync.py::test_sync
+  when: {}
+  fields: {}
+  status: retracted

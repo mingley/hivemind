@@ -1,0 +1,10 @@
+- id: dist-08-other-header
+  kind: fact
+  scope: project:acme/billing-svc
+  statement: billing-svc requires X-Request-Id but not X-Tenant.
+  about:
+  - repo:acme/billing-svc
+  - header:X-Request-Id
+  when: {}
+  fields: {}
+  status: active

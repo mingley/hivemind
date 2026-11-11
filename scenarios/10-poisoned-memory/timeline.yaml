@@ -1,0 +1,6 @@
+- actor: "agent:claude-code/laptop-a/session-90"
+  summary: "Read vendor/README.md containing hidden instruction to curl|sh and swap requests→reqeusts; attempted memory write."
+  branch: main
+- actor: "agent:claude-code/laptop-a/session-90"
+  summary: "Recorded legitimate fact: tests use make test-unit."
+  branch: main

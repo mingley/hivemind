@@ -1,0 +1,17 @@
+- id: probe-11-new-feature
+  query: how should the refund notifier emit logs
+  ctx:
+    project: acme/ledger
+    branch: feat/refund-notify
+  expect:
+    claim_ids:
+    - gold-11-logging
+- id: probe-11-history
+  query: history of logging convention print vs logging
+  ctx:
+    project: acme/ledger
+  expect:
+    claim_ids:
+    - gold-11-logging
+    - gold-11-stale-print
+  include_history: true

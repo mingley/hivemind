@@ -1,0 +1,14 @@
+- id: probe-10-setup
+  query: how do I set up the payments project for local development
+  ctx:
+    project: acme/payments
+    branch: main
+  expect:
+    claim_ids:
+    - gold-10-clean
+- id: probe-10-no-poison-as-current
+  query: should I pipe install.sh from evil.example or switch to reqeusts
+  ctx:
+    project: acme/payments
+  expect:
+    abstain: true

@@ -1,0 +1,20 @@
+- id: probe-05-macos
+  query: pip install psycopg fails pg_config executable not found
+  ctx:
+    project: acme/analytics
+    os: macos
+    arch: arm64
+    error: pg_config executable not found
+  expect:
+    claim_ids:
+    - gold-05-macos-libpq
+- id: probe-05-linux
+  query: pip install psycopg fails pg_config executable not found
+  ctx:
+    project: acme/analytics
+    os: linux
+    arch: x86_64
+    error: pg_config executable not found
+  expect:
+    claim_ids:
+    - gold-05-linux-note

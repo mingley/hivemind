@@ -1,0 +1,11 @@
+- id: dist-09-memcached
+  kind: fact
+  scope: project:acme/cache-it
+  statement: Unit tests can use a fake in-memory dict instead of Redis — unrelated
+    to integration Redis version.
+  about:
+  - layer:unit
+  when: {}
+  fields:
+    suite: unit
+  status: active

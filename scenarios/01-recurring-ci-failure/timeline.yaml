@@ -1,0 +1,9 @@
+- actor: "agent:claude-code/laptop-a/session-01"
+  summary: Investigated test_invoice_due_date AssertionError on CI; found TZ-dependent naive datetime comparison.
+  branch: main
+- actor: "agent:claude-code/laptop-a/session-01"
+  summary: Added autouse fixture forcing TZ=UTC in tests/conftest.py; commit a1b2c3d; tests green under TZ=America/Los_Angeles.
+  branch: main
+- actor: "agent:codex/ci-runner/session-02"
+  summary: New module reports/test_cutoff.py fails with the same AssertionError signature on Linux CI with TZ unset differently.
+  branch: feat/cutoff-reports

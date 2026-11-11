@@ -1,0 +1,30 @@
+- id: gold-08-xtenant
+  kind: fact
+  scope: project:acme/tenant-svc
+  statement: Clients must send the X-Tenant header on every request; handlers return
+    HTTP 400 if it is missing or empty.
+  about:
+  - repo:acme/tenant-svc
+  - header:X-Tenant
+  - sym:require_tenant
+  when: {}
+  fields:
+    header: X-Tenant
+    missing_status: 400
+    citation: src/middleware.py:12@b0c1d2e
+  status: active
+- id: gold-08-client-helper
+  kind: procedure
+  scope: project:acme/client-sdk
+  statement: When calling tenant-svc from client-sdk, set X-Tenant from the session
+    tenant id on every outbound request.
+  about:
+  - repo:acme/client-sdk
+  - repo:acme/tenant-svc
+  - header:X-Tenant
+  when: {}
+  fields:
+    caller_repo: acme/client-sdk
+    helper: client.with_tenant(tenant_id)
+    depends_on: gold-08-xtenant
+  status: active

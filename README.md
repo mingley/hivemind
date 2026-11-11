@@ -10,11 +10,12 @@ and tokens**, with enough provenance that agents can verify what they
 retrieve. It runs as a lean local daemon on a laptop and is designed to grow
 into a shared service.
 
-> **Status (2026-11-11):** research done; M0 engine core and M1 local daemon +
-> MCP shim are built and tested. Several agents on one machine can share a
-> store over stdio MCP (`hivemind mcp` → `hivemindd`). This is **not**
-> production-ready: no remote/auth story, RSS still over the laptop target,
-> and sandbox compatibility is unproven. Setup:
+> **Status (2026-11-11):** research done; M0 engine, M1 daemon/MCP, and M2
+> evaluation harness (`hivebench` + 12 seed scenarios) are built and tested.
+> Several agents on one machine can share a store over stdio MCP
+> (`hivemind mcp` → `hivemindd`). This is **not** production-ready: no
+> remote/auth story, post-mitigation RSS not yet re-measured against the
+> 50 MB target, and sandbox compatibility is unproven. Setup:
 > [docs/setup-mcp.md](docs/setup-mcp.md).
 
 ## What makes it different
@@ -50,6 +51,7 @@ into a shared service.
 | 07 | [Falsification experiments](docs/07-falsification-experiments.md) | Prioritized experiments that could overturn design bets early |
 | 08 | [Hippocampal design](docs/08-hippocampal-design.md) | Which ideas from hippocampal research become mechanisms, and how each is tested |
 | — | [MCP setup](docs/setup-mcp.md) | Build `hivemind` / `hivemindd`, configure Claude Code, Codex CLI, and Copilot CLI |
+| — | [hivebench scenarios](scenarios/README.md) | M2 seed scenarios for offline retrieval and harness dry-runs |
 
 The [`research/`](research/) directory holds the sourced research reports these
 documents build on. Every external claim is labeled **[V]** verified, **[C]**
@@ -90,7 +92,7 @@ claims):
 | Recall across all scopes | p95 4.8 ms |
 | Write acknowledged after `F_FULLFSYNC` | p95 8.9 ms |
 | Replay on open | 0.8 s |
-| RSS after replay | 230 MB, over the 50 MB target; compact-row mitigations still open after M1 |
+| RSS after replay | 230 MB pre-mitigation; keydir/interning/token caps landed in M1 — re-measure before claiming ≤ 50 MB |
 
 Details, follow-ups, and milestones are in
 [06](docs/06-prototype-plan.md#m0-status-engine-core-done-2026-11-10) and
@@ -105,8 +107,10 @@ that checks every acknowledged write survives.
 ```text
 docs/        design documents (start with 01, then 04); setup-mcp.md for agents
 research/    sourced research reports, one per thread
+scenarios/   M2 seed scenarios for hivebench
 crates/
   hivemind-core/     memory model types: claims, events, scopes, applicability, belief, hygiene
   hivemind-engine/   storage engine: log, blobs, projections, BM25, recall
   hivemind/          `hivemind` CLI, `hivemindd` daemon, and `hivemind mcp` stdio shim
+  hivebench/         M2 evaluation harness (offline E-R, baselines, dry-run)
 ```

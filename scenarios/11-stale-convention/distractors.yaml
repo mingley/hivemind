@@ -1,0 +1,11 @@
+- id: dist-11-cli-print
+  kind: preference
+  scope: project:acme/ledger
+  statement: CLI entrypoints may print user-facing output to stdout; that is not application
+    logging.
+  about:
+  - layer:cli
+  when: {}
+  fields:
+    layer: cli
+  status: active

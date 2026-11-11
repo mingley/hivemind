@@ -1,0 +1,9 @@
+- actor: "agent:claude-code/laptop-a/session-30"
+  summary: "Implemented token bucket core, Redis backend, and metrics hooks (subtasks 1–3). Commits c101, c102, c103 on feat/rate-limit."
+  branch: feat/rate-limit
+- actor: "agent:claude-code/laptop-a/session-30"
+  summary: Left test_burst_window failing (off-by-one on window end). Started editing limiter.py burst path; process killed mid-edit.
+  branch: feat/rate-limit
+- actor: "agent:claude-code/laptop-a/session-30"
+  summary: Wrote handoff claim for work item WI-441 before crash.
+  branch: feat/rate-limit

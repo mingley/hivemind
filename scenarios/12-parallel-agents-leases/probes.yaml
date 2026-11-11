@@ -1,0 +1,19 @@
+- id: probe-12-before-ttl
+  query: can I edit src/parser.py for validation helpers right now
+  ctx:
+    project: acme/protocol
+    resource: src/parser.py
+  expect:
+    claim_ids:
+    - gold-12-lease
+    - gold-12-reclaim-policy
+- id: probe-12-after-crash
+  query: worker-1 crashed on parser lease what partial work exists and how do I reclaim
+  ctx:
+    project: acme/protocol
+    resource: src/parser.py
+  expect:
+    claim_ids:
+    - gold-12-lease
+    - gold-12-partial
+    - gold-12-reclaim-policy

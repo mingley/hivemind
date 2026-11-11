@@ -1,0 +1,35 @@
+- id: gold-01-fix
+  kind: solution
+  scope: project:acme/billing
+  statement: test_invoice_due_date fails with AssertionError on due_at when TZ is
+    not UTC because naive local datetimes are compared to UTC-aware values; fix by
+    forcing TZ=UTC in an autouse conftest fixture.
+  about:
+  - repo:acme/billing
+  - test:tests/test_invoice.py::test_invoice_due_date
+  - err:pytest/AssertionError/due_at
+  when:
+    toolchain: pytest>=7
+    lang: python
+  fields:
+    error_signature: 'AssertionError: assert datetime(2026, 3, 15, 0, 0) == datetime(2026,
+      3, 15, 7, 0, tzinfo=datetime.timezone.utc)'
+    root_cause: naive datetime constructed without timezone compared under non-UTC
+      TZ
+    fix: 'autouse fixture in tests/conftest.py: os.environ[''TZ'']=''UTC''; time.tzset()'
+    fix_commit: a1b2c3d
+    citation: tests/conftest.py:1-12@a1b2c3d
+  status: active
+- id: gold-01-procedure
+  kind: procedure
+  scope: project:acme/billing
+  statement: When adding datetime-sensitive tests in billing, run pytest once with
+    TZ=America/Los_Angeles to catch naive-datetime assumptions.
+  about:
+  - repo:acme/billing
+  - pkg:pypi/pytest
+  when:
+    os: linux
+  fields:
+    command: TZ=America/Los_Angeles pytest -q
+  status: active

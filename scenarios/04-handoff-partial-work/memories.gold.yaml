@@ -1,0 +1,34 @@
+- id: gold-04-handoff
+  kind: handoff
+  scope: project:acme/edge
+  statement: 'WI-441 rate limiter: subtasks 1–3 done on feat/rate-limit; remaining:
+    fix test_burst_window off-by-one and wire HTTP middleware; next step: finish limiter.py
+    burst inclusive end; verification: pytest tests/test_limiter.py failing on test_burst_window.'
+  about:
+  - repo:acme/edge
+  - work:WI-441
+  - test:tests/test_limiter.py::test_burst_window
+  when:
+    branch: feat/rate-limit
+  fields:
+    done: 1 token bucket core; 2 Redis backend; 3 metrics hooks
+    remaining: 4 fix burst window inclusive end; 5 HTTP middleware
+    next_step: In limiter.py allow(key) treat window end as inclusive; re-run test_burst_window
+    verification_state: pytest tests/test_limiter.py::test_burst_window FAIL
+    files: src/limiter.py,tests/test_limiter.py,src/redis_backend.py
+    avoid_redo: commits c101 c102 c103 — do not revert
+  status: active
+- id: gold-04-failing-test
+  kind: fact
+  scope: project:acme/edge
+  statement: test_burst_window fails because allow() excludes the window end instant;
+    expected inclusive end for burst accounting.
+  about:
+  - test:tests/test_limiter.py::test_burst_window
+  - sym:limiter.allow
+  when:
+    branch: feat/rate-limit
+  fields:
+    failure: 'AssertionError: expected allow() True at window end'
+    suspect_file: src/limiter.py
+  status: active

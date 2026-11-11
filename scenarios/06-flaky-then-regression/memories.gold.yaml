@@ -1,0 +1,29 @@
+- id: gold-06-flaky
+  kind: warning
+  scope: project:acme/syncer
+  statement: 'test_sync is flaky due to a race on the shared buffer; quarantined pending
+    issue #123.'
+  about:
+  - test:tests/test_sync.py::test_sync
+  - issue:acme/syncer#123
+  when: {}
+  fields:
+    symptom: intermittent AssertionError on buffer length
+    action: quarantine @pytest.mark.flaky
+    issue: '#123'
+  status: invalidated
+- id: gold-06-race-fixed
+  kind: fact
+  scope: project:acme/syncer
+  statement: 'Race in test_sync shared buffer was fixed in commit f1xrace; quarantine
+    removed; issue #123 closed. Subsequent test_sync failures are real regressions.'
+  about:
+  - test:tests/test_sync.py::test_sync
+  - commit:f1xrace
+  - issue:acme/syncer#123
+  when: {}
+  fields:
+    after_commit: f1xrace
+    fix_commit: f1xrace
+    invalidates: gold-06-flaky
+  status: active

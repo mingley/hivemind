@@ -1,0 +1,6 @@
+- actor: "agent:claude-code/laptop-a/session-60"
+  summary: "Documented deprecation: use fetch_user() instead of get_user(); cited users.py:40."
+  branch: main
+- actor: "human:maintainer"
+  summary: "Removed get_user(); changed fetch_user(user_id: str) to fetch_user(tenant: str, id: UserId)."
+  branch: main

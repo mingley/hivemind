@@ -1,0 +1,9 @@
+- actor: "agent:claude-code/laptop-a/session-80"
+  summary: Integration suite failed on Redis 6; concluded Redis 7 required.
+  branch: main
+- actor: "agent:codex/laptop-b/session-81"
+  summary: Ran a subset of tests against Redis 6 successfully; recorded that Redis 6 works.
+  branch: main
+- actor: "agent:claude-code/ci/session-82"
+  summary: "Discriminating check: test_acl_probe uses SMISMEMBER (Redis 7+); Redis 6 fails that test only."
+  branch: main

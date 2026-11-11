@@ -1,0 +1,19 @@
+- id: probe-09-which-redis
+  query: what Redis version do integration tests need
+  ctx:
+    project: acme/cache-it
+    branch: main
+  expect:
+    claim_ids:
+    - gold-09-needs7
+    - gold-09-resolution
+- id: probe-09-conflict-history
+  query: conflict between Redis 6 and Redis 7 reports
+  ctx:
+    project: acme/cache-it
+  expect:
+    claim_ids:
+    - gold-09-needs7
+    - gold-09-redis6-ok
+    - gold-09-resolution
+  include_history: true

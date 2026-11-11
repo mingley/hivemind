@@ -1,0 +1,12 @@
+- id: dist-12-other-file-lease
+  kind: fact
+  scope: project:acme/protocol
+  statement: worker-3 holds a lease on src/codec.py — unrelated to parser.py coordination.
+  about:
+  - file:src/codec.py
+  - lease:codec.py
+  when:
+    resource: src/codec.py
+  fields:
+    holder: agent:claude-code/worker-3
+  status: active

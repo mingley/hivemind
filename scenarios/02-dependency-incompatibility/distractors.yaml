@@ -1,0 +1,11 @@
+- id: dist-02-other-pin
+  kind: warning
+  scope: project:acme/gateway
+  statement: Do not bump pydantic to v2 on the legacy admin API; unrelated to httpx/respx.
+  about:
+  - pkg:pypi/pydantic
+  when: {}
+  fields:
+    service: admin-api
+    pin: pydantic<2
+  status: active

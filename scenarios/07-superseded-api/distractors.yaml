@@ -1,0 +1,10 @@
+- id: dist-07-http-get-user
+  kind: fact
+  scope: project:acme/accounts
+  statement: Public HTTP route GET /users/{id} remains; only the Python helper get_user
+    was removed.
+  about:
+  - route:GET /users/{id}
+  when: {}
+  fields: {}
+  status: active

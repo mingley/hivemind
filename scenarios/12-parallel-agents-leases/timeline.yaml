@@ -1,0 +1,9 @@
+- actor: "agent:claude-code/worker-1/session-110"
+  summary: "Acquired lease on src/parser.py (TTL 15m, fencing token 7) for error-recovery task; started partial rewrite of parse_frame."
+  branch: feat/parse-recover
+- actor: "agent:claude-code/worker-1/session-110"
+  summary: Crashed mid-edit; lease still held until TTL expiry; partial diff left uncommitted in working tree noted via change notification.
+  branch: feat/parse-recover
+- actor: "agent:codex/worker-2/session-111"
+  summary: Assigned overlapping task on parser validation; waits for lease reclaim / notification before editing.
+  branch: feat/parse-validate

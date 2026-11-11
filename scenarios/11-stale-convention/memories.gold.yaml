@@ -1,0 +1,26 @@
+- id: gold-11-stale-print
+  kind: preference
+  scope: project:acme/ledger
+  statement: Use print() for logging in application code.
+  about:
+  - repo:acme/ledger
+  - conv:logging
+  when: {}
+  fields:
+    style: print
+  status: superseded
+- id: gold-11-logging
+  kind: preference
+  scope: project:acme/ledger
+  statement: Use the standard logging module (logging.getLogger(__name__)) for application
+    logs; do not use print in src/.
+  about:
+  - repo:acme/ledger
+  - conv:logging
+  - pkg:stdlib/logging
+  when: {}
+  fields:
+    style: logging.getLogger
+    lint: ruff T201 forbid print in src/
+    supersedes: gold-11-stale-print
+  status: active

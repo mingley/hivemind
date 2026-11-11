@@ -1,0 +1,7 @@
+[project]
+name = "acme-gateway"
+version = "0.4.0"
+dependencies = [
+  "httpx==0.28.1",
+  "respx==0.21.0",
+]

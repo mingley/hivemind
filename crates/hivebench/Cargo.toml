@@ -1,0 +1,29 @@
+[package]
+name = "hivebench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "hivemind evaluation harness: scenarios, offline retrieval, token ledger"
+
+[[bin]]
+name = "hivebench"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+hivemind-core = { version = "0.1.0", path = "../hivemind-core" }
+hivemind-engine = { version = "0.1.0", path = "../hivemind-engine" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde_yaml = "0.9.34"
+thiserror = "2.0.21"
+tempfile = "3.27.0"
+walkdir = "2.5.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

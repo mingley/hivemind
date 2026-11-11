@@ -1,0 +1,43 @@
+- id: gold-09-needs7
+  kind: fact
+  scope: project:acme/cache-it
+  statement: Integration tests need Redis 7 because test_acl_probe uses SMISMEMBER,
+    which Redis 6 does not support.
+  about:
+  - repo:acme/cache-it
+  - pkg:redis
+  - test:tests/test_acl_probe.py
+  - cmd:SMISMEMBER
+  when: {}
+  fields:
+    min_version: 7.0
+    discriminating_test: tests/test_acl_probe.py::test_smismember
+    evidence: 'Redis 6.2: ERR unknown command SMISMEMBER'
+  status: active
+- id: gold-09-redis6-ok
+  kind: fact
+  scope: project:acme/cache-it
+  statement: Redis 6 works for the integration suite (partial run; did not execute
+    test_acl_probe).
+  about:
+  - repo:acme/cache-it
+  - pkg:redis
+  when: {}
+  fields:
+    min_version: 6.0
+    note: subset only; conflicts with gold-09-needs7
+  status: retracted
+- id: gold-09-resolution
+  kind: decision
+  scope: project:acme/cache-it
+  statement: 'Canonical requirement: CI and docs must use Redis >=7.0; Redis 6 claim
+    retracted after SMISMEMBER discriminating check.'
+  about:
+  - repo:acme/cache-it
+  - pkg:redis
+  when: {}
+  fields:
+    canonical: gold-09-needs7
+    demoted: gold-09-redis6-ok
+    check: redis-cli SMISMEMBER k a
+  status: active

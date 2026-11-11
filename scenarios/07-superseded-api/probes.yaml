@@ -1,0 +1,17 @@
+- id: probe-07-implement-caller
+  query: how do I load a user by id for the billing adapter
+  ctx:
+    project: acme/accounts
+    branch: main
+  expect:
+    claim_ids:
+    - gold-07-current-api
+- id: probe-07-history
+  query: history of get_user fetch_user API change
+  ctx:
+    project: acme/accounts
+  expect:
+    claim_ids:
+    - gold-07-current-api
+    - gold-07-old-api
+  include_history: true

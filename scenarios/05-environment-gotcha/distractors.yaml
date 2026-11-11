@@ -1,0 +1,11 @@
+- id: dist-05-docker-only
+  kind: procedure
+  scope: project:acme/analytics
+  statement: Use the analytics-dev Docker image which already bundles libpq — skip
+    host package installs when developing in Compose.
+  about:
+  - tool:docker
+  when:
+    runtime: docker
+  fields: {}
+  status: active

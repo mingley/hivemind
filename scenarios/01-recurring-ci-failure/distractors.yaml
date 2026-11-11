@@ -1,0 +1,23 @@
+- id: dist-01-unrelated-tz
+  kind: solution
+  scope: project:acme/billing
+  statement: Frontend date picker showed wrong day; fixed by formatting with date-fns-tz
+    America/New_York in the UI only.
+  about:
+  - repo:acme/billing
+  - pkg:npm/date-fns-tz
+  when: {}
+  fields:
+    layer: frontend
+    fix: use zonedTimeToUtc in InvoiceDateField.tsx
+  status: active
+- id: dist-01-old-pin
+  kind: warning
+  scope: project:acme/billing
+  statement: Do not upgrade pytz; stick to zoneinfo — unrelated to the due_at assertion
+    failure.
+  about:
+  - pkg:pypi/pytz
+  when: {}
+  fields: {}
+  status: active
