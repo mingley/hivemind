@@ -15,11 +15,14 @@ use hivemind_core::{
 use serde::Serialize;
 
 use crate::state::{Belief, ClaimRow, FeedbackTally, Invalidation, Retraction, State};
+use crate::vector;
 
 pub const DEFAULT_LIMIT: usize = 8;
 pub const DEFAULT_BUDGET_TOKENS: usize = 1_200;
 /// Name of the ranking heuristics below. Tuned by experiments F4 and F5.
-pub const RANKING_POLICY: &str = "rank-v0";
+pub const RANKING_POLICY: &str = "rank-v1";
+/// Reciprocal-rank fusion constant (Cormack et al.).
+pub const RRF_K: f32 = 60.0;
 const EDGE_STATEMENT_CHARS: usize = 120;
 
 #[derive(Clone, Debug, Default)]
@@ -45,6 +48,18 @@ pub struct Query {
     /// searching (read-your-writes). The recall path itself does not wait;
     /// callers use [`crate::Store::wait_for_offset`].
     pub min_offset: Option<u64>,
+    /// Optional query embedding for hybrid lexical+vector recall (M4).
+    pub query_vector: Option<Vec<f32>>,
+    /// How many vector hits to fetch before fusion [default: 64].
+    pub vector_limit: Option<usize>,
+    /// Rescore this many int8 candidates with f32 [default: 32].
+    pub vector_rescore: Option<usize>,
+    /// Drop cards whose fused score falls below this floor (C18 abstention).
+    pub min_score: Option<f32>,
+    /// Boost claims whose `about` entities appear in the query text (C8).
+    pub entity_boost: bool,
+    /// After strong hits, also surface ±k temporal neighbors from the log (C9).
+    pub temporal_neighbors: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -174,7 +189,7 @@ const RERANK_FACTOR: usize = 8;
 
 pub(crate) fn recall(state: &State, query: &Query) -> Recall {
     let now = query.now.unwrap_or_else(Timestamp::now);
-    let candidates: Vec<(u32, f32)> = if query.text.trim().is_empty() {
+    let lexical: Vec<(u32, f32)> = if query.text.trim().is_empty() {
         (0..state.claims.len() as u32)
             .map(|doc| (doc, 1.0))
             .collect()
@@ -182,10 +197,33 @@ pub(crate) fn recall(state: &State, query: &Query) -> Recall {
         state.lexical.search(&query.text)
     };
 
+    let vector_hits: Vec<(u32, f32)> = query
+        .query_vector
+        .as_ref()
+        .filter(|v| !v.is_empty() && !state.vectors.is_empty())
+        .map(|qv| {
+            state.vectors.search(
+                qv,
+                query.vector_limit.unwrap_or(64),
+                query.vector_rescore.unwrap_or(32),
+            )
+        })
+        .unwrap_or_default();
+
+    let candidates: Vec<(u32, f32)> = if vector_hits.is_empty() {
+        lexical
+    } else if query.text.trim().is_empty() {
+        vector_hits
+    } else {
+        vector::rrf_fuse(&lexical, &vector_hits, RRF_K)
+    };
+
     // Pass 1: filters and cheap per-row multipliers.
     let mut ranked: Vec<(u32, f32, Applicability)> = Vec::new();
     for (doc, base) in candidates {
-        let row = &state.claims[doc as usize];
+        let Some(row) = state.claims.get(doc as usize) else {
+            continue;
+        };
         if !query.scopes.is_empty() && !query.scopes.contains(&row.scope) {
             continue;
         }
@@ -207,7 +245,12 @@ pub(crate) fn recall(state: &State, query: &Query) -> Recall {
         if applicability.is_mismatch() && !query.include_inapplicable {
             continue;
         }
-        let score = base * row_multiplier(row, &applicability, now);
+        let mut score = base * row_multiplier(row, &applicability, now);
+        if query.entity_boost {
+            score *= entity_boost_multiplier(row, &query.text);
+        }
+        // C3: novelty / prediction-error salience weights ranking, never gates writes.
+        score *= salience_multiplier(row);
         ranked.push((doc, score, applicability));
     }
     let matched = ranked.len();
@@ -236,6 +279,14 @@ pub(crate) fn recall(state: &State, query: &Query) -> Recall {
             .then(a.id.cmp(&b.id))
     });
 
+    if let Some(k) = query.temporal_neighbors.filter(|k| *k > 0) {
+        expand_temporal_neighbors(state, &mut cards, k, query, now);
+    }
+
+    if let Some(min) = query.min_score {
+        cards.retain(|c| c.score >= min);
+    }
+
     let budget = query.budget_tokens.unwrap_or(DEFAULT_BUDGET_TOKENS);
     let mut kept = Vec::new();
     let mut tokens = 0;
@@ -248,13 +299,89 @@ pub(crate) fn recall(state: &State, query: &Query) -> Recall {
         kept.push(card);
     }
     Recall {
-        omitted: matched - kept.len(),
+        omitted: matched.saturating_sub(kept.len()),
         matched,
         cards: kept,
         estimated_tokens: tokens,
         as_of_offset: state.next_offset,
         ranking: RANKING_POLICY,
     }
+}
+
+fn entity_boost_multiplier(row: &ClaimRow, text: &str) -> f32 {
+    if row.about.is_empty() || text.is_empty() {
+        return 1.0;
+    }
+    let lower = text.to_ascii_lowercase();
+    let hit = row.about.iter().any(|entity| {
+        let e = entity.to_ascii_lowercase();
+        let bare = e.rsplit('/').next().unwrap_or(&e);
+        lower.contains(&e) || (!bare.is_empty() && lower.contains(bare))
+    });
+    if hit { 1.25 } else { 1.0 }
+}
+
+fn salience_multiplier(row: &ClaimRow) -> f32 {
+    let mut m = 1.0;
+    if row.feedback.harmful > 0 || row.feedback.helpful > 0 {
+        // Reinforced or contested claims are more salient than untouched ones.
+        m *= 1.05;
+    }
+    if row.kind == ClaimKind::Warning {
+        m *= 1.08;
+    }
+    m
+}
+
+fn expand_temporal_neighbors(
+    state: &State,
+    cards: &mut Vec<Card>,
+    k: usize,
+    query: &Query,
+    now: Timestamp,
+) {
+    if cards.is_empty() {
+        return;
+    }
+    let seed = cards[0].id;
+    let Some(seed_row) = state.row(&seed) else {
+        return;
+    };
+    let seed_doc = seed_row.doc as isize;
+    let existing: std::collections::BTreeSet<_> = cards.iter().map(|c| c.id).collect();
+    let mut extras = Vec::new();
+    for delta in -(k as isize)..=k as isize {
+        if delta == 0 {
+            continue;
+        }
+        let doc = seed_doc + delta;
+        if doc < 0 {
+            continue;
+        }
+        let Some(row) = state.claims.get(doc as usize) else {
+            continue;
+        };
+        if existing.contains(&row.id) {
+            continue;
+        }
+        if row.status != Status::Active && !query.include_history {
+            continue;
+        }
+        let applicability = applicability::evaluate(&row.applies_when, &query.context);
+        if applicability.is_mismatch() && !query.include_inapplicable {
+            continue;
+        }
+        // Neighbor of a strong hit: small boost, below the seed.
+        let prior = cards[0].score * 0.85;
+        extras.push(card_with_prior(state, row, prior, applicability, now));
+    }
+    cards.extend(extras);
+    cards.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then(b.recorded_at.cmp(&a.recorded_at))
+            .then(a.id.cmp(&b.id))
+    });
 }
 
 /// Multipliers that need only the row: status, applicability, recency by

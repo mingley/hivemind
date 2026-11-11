@@ -462,7 +462,6 @@ fn run(cli: Cli) -> Result<()> {
         Command::Recall(args) => {
             let query = Query {
                 text: args.query.join(" "),
-                min_offset: None,
                 scopes: args.scopes,
                 kinds: args.kinds,
                 about: args.about,
@@ -471,7 +470,8 @@ fn run(cli: Cli) -> Result<()> {
                 include_inapplicable: args.all_contexts,
                 limit: args.limit,
                 budget_tokens: args.budget,
-                now: None,
+                entity_boost: true,
+                ..Query::default()
             };
             let result = store.recall(&query);
             if out.json {

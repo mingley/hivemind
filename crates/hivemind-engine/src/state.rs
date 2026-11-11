@@ -24,6 +24,7 @@ use hivemind_core::{
 use serde::Serialize;
 
 use crate::lexical::{DEFAULT_MAX_TERMS, LexicalIndex};
+use crate::vector::VectorIndex;
 
 /// Characters kept in the in-memory statement cache for cards and edge previews.
 pub const STATEMENT_CACHE_CHARS: usize = 280;
@@ -225,6 +226,7 @@ pub struct State {
     pub(crate) leases: HashMap<String, LeaseRow>,
     idempotency: HashMap<(Arc<str>, String), Ack>,
     pub(crate) lexical: LexicalIndex,
+    pub(crate) vectors: VectorIndex,
     pub(crate) intern: Interner,
     pub(crate) next_offset: u64,
     /// `(offset, truncated bytes)` of every recorded recovery.
@@ -253,6 +255,7 @@ impl State {
             leases: HashMap::new(),
             idempotency: HashMap::new(),
             lexical: LexicalIndex::with_max_terms(max_terms),
+            vectors: VectorIndex::default(),
             intern: Interner::default(),
             next_offset: 0,
             recoveries: Vec::new(),
@@ -534,7 +537,9 @@ impl State {
         }
         // `provenance.method` is a label the writer chooses, so it never grants trust.
         let authored_by_human = event.actor.kind == ActorKind::Human;
-        self.lexical.add(doc, &data.index_text());
+        let mut index_text = data.index_text();
+        index_text.push_str(&crate::keys::expand(&data.statement, &data.about));
+        self.lexical.add(doc, &index_text);
         let about: Vec<Arc<str>> = data
             .about
             .iter()

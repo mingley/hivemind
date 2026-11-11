@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hivemind_core::applicability::{self, Context};
@@ -30,6 +31,7 @@ use crate::lexical::DEFAULT_MAX_TERMS;
 use crate::log::{DEFAULT_SEGMENT_BYTES, Durability, Log, Recovery};
 use crate::recall::{self, Card, ClaimDetail, Query, Recall};
 use crate::state::{ArtifactRow, LeaseRow, State};
+use crate::vector::{Embedder, EmbeddingSpace};
 
 pub const STORE_FORMAT: u32 = 1;
 const MANIFEST: &str = "MANIFEST";
@@ -221,7 +223,6 @@ impl VerifyReport {
     }
 }
 
-#[derive(Debug)]
 pub struct Store {
     dir: PathBuf,
     manifest: Manifest,
@@ -229,7 +230,18 @@ pub struct Store {
     state: RwLock<State>,
     blobs: BlobStore,
     recovery: Recovery,
+    embedder: Mutex<Option<Arc<dyn Embedder>>>,
     _lock: File,
+}
+
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Store")
+            .field("dir", &self.dir)
+            .field("store_id", &self.manifest.store_id)
+            .field("has_embedder", &self.embedder.lock().is_some())
+            .finish()
+    }
 }
 
 impl Store {
@@ -294,6 +306,7 @@ impl Store {
             state: RwLock::new(state),
             blobs,
             recovery,
+            embedder: Mutex::new(None),
             _lock: lock,
         };
         if store.recovery.truncated_bytes > 0 {
@@ -390,7 +403,78 @@ impl Store {
             return Ok(receipt);
         }
         let similar = self.similar(claim, &supersedes, &statement);
+        // Drop the read guard before indexing: a temporary held across
+        // `index_doc_vector` would deadlock with its write lock.
+        let doc = self.state.read().row(&claim).map(|r| r.doc);
+        if let Some(doc) = doc {
+            self.index_doc_vector(doc, &statement);
+        }
         Ok(Receipt { similar, ..receipt })
+    }
+
+    /// Attach a pure-Rust [`Embedder`]. Reindexes existing claims into the
+    /// in-memory vector space. Spaces must not be mixed within one store.
+    pub fn set_embedder(&self, embedder: Arc<dyn Embedder>) -> Result<()> {
+        {
+            let mut state = self.state.write();
+            state
+                .vectors
+                .set_space(embedder.space().clone())
+                .map_err(Error::Invalid)?;
+        }
+        *self.embedder.lock() = Some(embedder);
+        self.reindex_vectors()?;
+        Ok(())
+    }
+
+    pub fn embedding_space(&self) -> Option<EmbeddingSpace> {
+        if let Some(space) = self.embedder.lock().as_ref().map(|e| e.space().clone()) {
+            return Some(space);
+        }
+        self.state.read().vectors.space().cloned()
+    }
+
+    pub fn vector_count(&self) -> usize {
+        self.state.read().vectors.len()
+    }
+
+    /// Rebuild all vectors from claim statement caches using the current embedder.
+    pub fn reindex_vectors(&self) -> Result<()> {
+        let embedder = self.embedder.lock().clone();
+        let Some(embedder) = embedder else {
+            return Ok(());
+        };
+        let rows: Vec<(u32, String)> = self
+            .state
+            .read()
+            .claims()
+            .iter()
+            .map(|r| (r.doc, r.statement_cache.clone()))
+            .collect();
+        let mut state = self.state.write();
+        state
+            .vectors
+            .set_space(embedder.space().clone())
+            .map_err(Error::Invalid)?;
+        for (doc, text) in rows {
+            let values = embedder.embed(&text);
+            state
+                .vectors
+                .upsert_f32(doc, values)
+                .map_err(Error::Invalid)?;
+        }
+        Ok(())
+    }
+
+    fn index_doc_vector(&self, doc: u32, text: &str) {
+        let embedder = self.embedder.lock().clone();
+        let Some(embedder) = embedder else {
+            return;
+        };
+        let values = embedder.embed(text);
+        let mut state = self.state.write();
+        let _ = state.vectors.set_space(embedder.space().clone());
+        let _ = state.vectors.upsert_f32(doc, values);
     }
 
     /// Marks a claim as wrong (`wrong`), recorded wrongly (`misrecorded`), or a
@@ -701,7 +785,14 @@ impl Store {
     // ----- reads --------------------------------------------------------
 
     pub fn recall(&self, query: &Query) -> Recall {
-        recall::recall(&self.state.read(), query)
+        let mut query = query.clone();
+        if query.query_vector.is_none()
+            && !query.text.trim().is_empty()
+            && let Some(embedder) = self.embedder.lock().clone()
+        {
+            query.query_vector = Some(embedder.embed(&query.text));
+        }
+        recall::recall(&self.state.read(), &query)
     }
 
     /// The full (L1) view of a claim. With a context, applicability is evaluated too.

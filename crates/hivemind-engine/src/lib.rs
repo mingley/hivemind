@@ -17,11 +17,13 @@ pub mod blob;
 pub mod codec;
 pub mod error;
 mod fsutil;
+pub mod keys;
 pub mod lexical;
 pub mod log;
 pub mod recall;
 pub mod state;
 pub mod store;
+pub mod vector;
 
 pub use error::{Error, Result};
 pub use log::{Durability, Recovery};
@@ -31,3 +33,4 @@ pub use store::{
     ChangesFilter, LeaseReceipt, LeaseView, Manifest, Options, Receipt, Remember, Stats, Store,
     VerifyReport,
 };
+pub use vector::{Embedder, EmbeddingSpace, HashEmbedder, Quantization, VectorIndex, rrf_fuse};

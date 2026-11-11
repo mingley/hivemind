@@ -147,8 +147,8 @@ impl Service {
             include_inapplicable: p.all_contexts.unwrap_or(false),
             limit: p.limit,
             budget_tokens: p.budget,
-            now: None,
-            min_offset: None,
+            entity_boost: true,
+            ..Query::default()
         };
         Ok(serde_json::to_value(self.store.recall(&query))?)
     }
