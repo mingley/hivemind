@@ -45,7 +45,7 @@ F13 (crash safety) runs from M0 onward and blocks every release.
     before acknowledgement;
   - recovery that truncates a torn tail and refuses to open on corruption;
   - the BLAKE3 blob store;
-  - projections and the `belief-v0` policy (independent evidence groups,
+  - projections and the `belief-v1` policy (independent evidence groups,
     disputes, taint);
   - code-aware BM25;
   - recall with filters, applicability, two-phase ranking, and token-budgeted
