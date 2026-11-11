@@ -1,3 +1,104 @@
 # hivemind
 
-A collective, durable memory for AI agents.
+**A collective, durable memory for AI agents: a shared computational
+hippocampus, written in Rust.**
+
+hivemind lets many agents (Claude Code, Copilot, Codex, Cursor, custom agents)
+preserve, share, update, and retrieve what they learn across sessions,
+projects, and machines. The goal is **better agent outcomes per unit of compute
+and tokens**, with enough provenance that agents can verify what they
+retrieve. It runs as a lean local daemon on a laptop and is designed to grow
+into a shared service.
+
+> **Status (2026-11-10):** research done; the engine core (M0) is built and
+> tested. The daemon and MCP server (M1) are next. Nothing here is
+> production-ready yet.
+
+## What makes it different
+
+- **One integrated system, all Rust:** our own log-structured storage engine,
+  indexes, retrieval, and protocols. It is not a glue layer over other
+  services ([decisions](docs/04-architecture-and-decisions.md)).
+- **Evidence, not instructions.** Every memory carries provenance, citations,
+  and a trust tier. Results say whether a memory's cited code still matches,
+  and the current code always wins.
+- **Correct over time.** Supersession, retraction, and invalidation are
+  distinct operations. Validity can depend on versions ("applies while
+  `openssl-sys` is 0.9.x on macOS arm64"), not only dates.
+- **Cheap by default.** No LLM is needed to write or read. Retrieval is
+  code-aware BM25 (vectors optional) and returns compact cards first, with full
+  evidence on demand.
+- **Multi-agent by design:** scopes (agent, project, team, global), a change
+  feed, leases with fencing tokens, and structured handoffs.
+- **Hippocampus-inspired where it pays:** fast episodic capture, slow optional
+  consolidation, and an index of cards that points to full evidence. Each
+  mechanism is tested, not assumed ([08](docs/08-hippocampal-design.md)).
+
+## Documents
+
+| # | Document | Contents |
+|---|---|---|
+| 01 | [Problem and goals](docs/01-problem-and-goals.md) | Problem, goals, non-goals, provisional targets, definitions, evidence labels |
+| 02 | [Landscape](docs/02-landscape.md) | What exists, what it does and doesn't do, and what we take from it |
+| 03 | [Memory model](docs/03-memory-model.md) | Logical model, lifecycle operations, trust, scopes, retrieval contract, six worked coding-agent examples |
+| 04 | [Architecture and decisions](docs/04-architecture-and-decisions.md) | Decision record, engine design, durability contract, staged path to distribution, risks |
+| 05 | [Evaluation plan](docs/05-evaluation-plan.md) | Memory quality, system performance, and cost per successful task, measured together against fair baselines |
+| 06 | [Build plan](docs/06-prototype-plan.md) | Milestones, what each proves and doesn't, open questions |
+| 07 | [Falsification experiments](docs/07-falsification-experiments.md) | Prioritized experiments that could overturn design bets early |
+| 08 | [Hippocampal design](docs/08-hippocampal-design.md) | Which ideas from hippocampal research become mechanisms, and how each is tested |
+
+The [`research/`](research/) directory holds the sourced research reports these
+documents build on. Every external claim is labeled **[V]** verified, **[C]**
+claim, **[I]** independent, **[Inf]** inference, or **[?]** open, with links and
+the date checked (2026-11-10).
+
+## Try it
+
+```bash
+cargo build --release
+alias hm=./target/release/hivemind   # the store defaults to ~/.hivemind/store; override with --dir
+
+hm remember "Linking fails with _SSL_CTX_new not found on macOS arm64; set OPENSSL_DIR to brew openssl@3" \
+  --kind solution --scope project:acme/api \
+  --about pkg:cargo/openssl-sys --when os=macos --when 'dep:cargo/openssl-sys=>=0.9.100, <0.10' \
+  --field fix='export OPENSSL_DIR=$(brew --prefix openssl@3)' \
+  --quote 'ld: symbol(s) not found for architecture arm64'
+
+hm recall _SSL_CTX_new not found --here --ctx dep:cargo/openssl-sys=0.9.103
+hm show <id-prefix>          # full claim: provenance, belief, links
+hm recall _SSL_CTX_new --ctx os=linux   # → no matching memories (the fix doesn't apply)
+```
+
+Other commands: `retract`, `invalidate`, `link`, `feedback`, `put`, `cat`,
+`log` (the change feed), `stats`, and `verify`. Run `hm --help` for the rest.
+
+## Status and measurements
+
+M0 measurements, from the engine benchmark (Apple M4 Pro, 100k synthetic
+claims):
+
+| Metric | Result |
+|---|---|
+| Recall within one scope | p95 1.0 ms |
+| Recall across all scopes | p95 4.8 ms |
+| Write acknowledged after `F_FULLFSYNC` | p95 8.9 ms |
+| Replay on open | 0.8 s |
+| RSS after replay | 230 MB, over the 50 MB target; fix planned for M1 |
+
+Details, follow-ups, and the next milestones are in
+[06](docs/06-prototype-plan.md#m0-status-engine-core-done-2026-11-10).
+
+Every change runs `cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings`, and `cargo test`. The test suite includes a `kill -9` crash loop
+that checks every acknowledged write survives.
+
+## Layout
+
+```text
+docs/        design documents (start with 01, then 04)
+research/    sourced research reports, one per thread
+crates/
+  hivemind-core/     memory model types: claims, events, scopes, applicability, belief, hygiene
+  hivemind-engine/   storage engine: log, blobs, projections, BM25, recall
+  hivemind/          the `hivemind` CLI (the daemon and MCP server come in M1)
+```
