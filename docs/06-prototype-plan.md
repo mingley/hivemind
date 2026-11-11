@@ -1,6 +1,6 @@
 # 06: Build plan, milestones, and open questions
 
-Status: v0.5 (2026-11-11). M0–M2 are done; M3 is next. Written after the
+Status: v0.6 (2026-11-11). M0–M3 are done; M4 is next. Written after the
 build decision ([04](04-architecture-and-decisions.md#decision-summary)). Each
 milestone ends with something usable, a test or benchmark that would expose
 failure, and an explicit list of what it does **not** prove.
@@ -191,6 +191,27 @@ baseline plumbing for F1–F4-style work. It does not run paid LLM agent loops,
 Tier C coding leaderboards, or earned-memories write-path experiments yet.
 
 Working notes: [m2-implementation-notes.md](m2-implementation-notes.md).
+
+## M3 status: coding-agent semantics (done 2026-11-11)
+
+**Built:**
+
+- **Citation verification:** read-time `valid` / `drifted` / `broken` checks
+  against a workspace (`content_hash` / BLAKE3); `show --workspace` / `--here`.
+- **Lockfile fingerprints:** Cargo.lock, package-lock.json, Pipfile.lock, and
+  poetry.lock → `dep:cargo|npm|pip/…` context keys for applicability.
+- **Handoffs:** `ClaimKind::Handoff` requires `goal`, `done`, `remaining`,
+  `next_step` payload fields.
+- **Leases:** durable acquire / renew / release with fencing tokens; CLI
+  `hivemind lease …` and daemon methods.
+- **Reinforcement / expiry:** helpful feedback with evidence still reinforces;
+  default `review_by` by kind when omitted (handoff 7d, question 30d,
+  fact/solution/warning/procedure 180d).
+- **Interop:** Copilot JSONL and markdown `import` / `export`.
+
+**What this proves / does not prove:** staleness signals, coordination leases,
+and exchange formats exist and are tested. It does not prove F5 outcome gains
+against baselines, nor shared-service security (M5).
 
 ## Open questions
 

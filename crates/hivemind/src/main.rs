@@ -77,6 +77,10 @@ enum Command {
     /// Acquire, renew, release, or list leases with fencing tokens.
     #[command(subcommand)]
     Lease(LeaseCmd),
+    /// Import Copilot JSONL or markdown memories.
+    Import(ImportArgs),
+    /// Export memories as Copilot JSONL or markdown.
+    Export(ExportArgs),
     /// Store a file (or `-` for stdin) as an artifact and print its hash.
     Put(PutArgs),
     /// Print an artifact's bytes.
@@ -326,6 +330,31 @@ struct LeaseReleaseArgs {
 }
 
 #[derive(Args, Debug)]
+struct ImportArgs {
+    /// File to import, or `-` for stdin.
+    file: PathBuf,
+    /// `jsonl` (Copilot) or `markdown`.
+    #[arg(long, value_parser = ["jsonl", "markdown"], default_value = "jsonl")]
+    format: String,
+    /// Validate and print counts without writing.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+struct ExportArgs {
+    /// Output file, or `-` for stdout.
+    #[arg(long, short = 'o', default_value = "-")]
+    output: PathBuf,
+    /// `jsonl` (Copilot) or `markdown`.
+    #[arg(long, value_parser = ["jsonl", "markdown"], default_value = "jsonl")]
+    format: String,
+    /// Max claims to export.
+    #[arg(long, default_value_t = 10_000)]
+    limit: usize,
+}
+
+#[derive(Args, Debug)]
 struct PutArgs {
     /// File to store, or `-` for stdin.
     file: PathBuf,
@@ -513,6 +542,8 @@ fn run(cli: Cli) -> Result<()> {
             out.receipt(&receipt, "recorded feedback")
         }
         Command::Lease(cmd) => run_lease(store, &actor, cmd, &out),
+        Command::Import(args) => run_import(store, &actor, args, &out),
+        Command::Export(args) => run_export(store, args, &out),
         Command::Put(args) => {
             let (bytes, default_name) = if args.file == Path::new("-") {
                 let mut bytes = Vec::new();
@@ -816,13 +847,87 @@ fn run_via_daemon(
                 out.print_json(&result)
             }
         },
-        Command::Put(_)
+        Command::Import(_)
+        | Command::Export(_)
+        | Command::Put(_)
         | Command::Cat { .. }
         | Command::Verify
         | Command::DebugWriteLoop { .. } => Err(anyhow!(
             "this command needs direct store access; stop hivemindd or use a different --dir"
         )),
         Command::Mcp { .. } | Command::Daemon(_) => unreachable!("handled earlier"),
+    }
+}
+
+fn run_import(store: &Store, actor: &Actor, args: ImportArgs, out: &Output) -> Result<()> {
+    let bytes = if args.file == Path::new("-") {
+        let mut buf = Vec::new();
+        io::stdin().read_to_end(&mut buf)?;
+        buf
+    } else {
+        fs::read(&args.file).with_context(|| format!("reading {}", args.file.display()))?
+    };
+    let ids = match args.format.as_str() {
+        "jsonl" => {
+            let memories = hivemind::exchange::read_copilot_jsonl(bytes.as_slice())?;
+            let n = memories.len();
+            let ids =
+                hivemind::exchange::import_copilot_jsonl(store, actor, memories, args.dry_run)?;
+            if args.dry_run {
+                println!("dry-run: {n} Copilot JSONL memories would import");
+                return Ok(());
+            }
+            ids
+        }
+        "markdown" => {
+            let text = String::from_utf8(bytes).context("markdown import must be UTF-8")?;
+            let ids = hivemind::exchange::import_markdown(store, actor, &text, args.dry_run)?;
+            if args.dry_run {
+                println!("dry-run: markdown memories validated");
+                return Ok(());
+            }
+            ids
+        }
+        other => anyhow::bail!("unsupported import format `{other}`"),
+    };
+    if out.json {
+        out.print_json(&serde_json::json!({ "imported": ids.len(), "claims": ids }))
+    } else {
+        println!("imported {} claims", ids.len());
+        Ok(())
+    }
+}
+
+fn run_export(store: &Store, args: ExportArgs, out: &Output) -> Result<()> {
+    let body = match args.format.as_str() {
+        "jsonl" => {
+            let memories = hivemind::exchange::export_copilot_jsonl(store, args.limit)?;
+            let mut buf = Vec::new();
+            hivemind::exchange::write_copilot_jsonl(&mut buf, &memories)?;
+            buf
+        }
+        "markdown" => hivemind::exchange::export_markdown(store, args.limit)?.into_bytes(),
+        other => anyhow::bail!("unsupported export format `{other}`"),
+    };
+    if args.output == Path::new("-") {
+        io::stdout().write_all(&body)?;
+        if out.json {
+            // already wrote the payload; ignore --json for stream formats
+        }
+        Ok(())
+    } else {
+        fs::write(&args.output, &body)
+            .with_context(|| format!("writing {}", args.output.display()))?;
+        if out.json {
+            out.print_json(&serde_json::json!({
+                "path": args.output,
+                "bytes": body.len(),
+                "format": args.format,
+            }))
+        } else {
+            println!("wrote {} bytes to {}", body.len(), args.output.display());
+            Ok(())
+        }
     }
 }
 

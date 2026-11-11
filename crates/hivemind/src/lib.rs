@@ -8,6 +8,7 @@
 pub mod backend;
 pub mod client;
 pub mod daemon;
+pub mod exchange;
 pub mod mcp;
 pub mod protocol;
 pub mod service;
