@@ -1,18 +1,24 @@
-# M1 implementation notes (working)
+# M1 implementation notes (historical)
 
-Status: in progress. Implements milestone **M1 Daemon and MCP** from
-[06](06-prototype-plan.md). Agents should treat this file as the shared
-contract while work is split across crates.
+Status: **implemented / historical** (2026-11-11). Milestone **M1 Daemon and
+MCP** from [06](06-prototype-plan.md) is done for the daemon, MCP shim, change
+feed, and setup docs. Keep this file as the contract snapshot used while the
+work was split across crates; prefer [06](06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11)
+and [setup-mcp.md](setup-mcp.md) for current status and operator docs.
+
+Items below that were **not** finished in M1 are marked *deferred*.
 
 ## Goals for this milestone
 
-1. `hivemindd`: single store owner, Unix socket, idle exit.
-2. `hivemind mcp`: thin stdio shim via `rmcp` (MCP 2026-07-28).
-3. Six MCP tools (deterministic order).
-4. `changes_since` change feed + read-your-writes via `min_offset`.
-5. Engine RSS mitigations: compact claim rows, string interning, token-type caps.
-6. Setup docs for Claude Code, Codex, and Copilot CLI.
-7. Update README and [06](06-prototype-plan.md) when M1 lands.
+1. `hivemindd`: single store owner, Unix socket, idle exit. **Done.**
+2. `hivemind mcp`: thin stdio shim via `rmcp` (MCP 2026-07-28). **Done.**
+3. Six MCP tools (deterministic order). **Done.**
+4. `changes_since` change feed + read-your-writes via `min_offset`. **Done.**
+5. Engine RSS mitigations: compact claim rows, string interning, token-type
+   caps. *Deferred* (still open; see M1 status in 06).
+6. Setup docs for Claude Code, Codex, and Copilot CLI. **Done**
+   ([setup-mcp.md](setup-mcp.md)).
+7. Update README and [06](06-prototype-plan.md) when M1 lands. **Done.**
 
 ## Process model
 
@@ -76,19 +82,22 @@ instructions, and **current code and tests take precedence**.
 ## Engine API additions (`hivemind-engine`)
 
 - `Query.min_offset: Option<u64>` — readers wait until projections reach it.
-- `Store::wait_for_offset(min_offset, timeout) -> Result<()>`
+  **Done.**
+- `Store::wait_for_offset(min_offset, timeout) -> Result<()>` **Done.**
 - `Store::changes_since(from, limit, filter) -> Result<Vec<(u64, Event)>>`
-  with optional scope / claim / kind filters.
+  with optional scope / claim / kind filters. **Done.**
 - Compact claim projection ("keydir"): keep filter/rank fields in RAM; load
   full `ClaimData` from the log by offset on demand (`show`, card expansion).
-- Intern scopes, principals, and entity keys.
+  *Deferred.*
+- Intern scopes, principals, and entity keys. *Deferred.*
 - Cap distinct token types in the lexical dictionary (drop rare tail tokens
   beyond a configurable cap; default high enough not to hurt small stores).
+  *Deferred.*
 
 ## Crate layout
 
 ```text
-crates/hivemind-engine/   # RSS + wait/changes APIs
+crates/hivemind-engine/   # wait/changes APIs (RSS work deferred)
 crates/hivemind/          # CLI, daemon, MCP, socket client/protocol
   src/main.rs
   src/daemon.rs
@@ -101,8 +110,8 @@ docs/setup-mcp.md         # Claude Code, Codex, Copilot CLI
 
 ## Tests expected
 
-- Engine: wait_for_offset, changes_since filters, compact-row round-trip,
-  interning/token-cap smoke tests, existing suite still green.
+- Engine: wait_for_offset, changes_since filters; existing suite still green.
+  Compact-row / interning / token-cap tests await the deferred RSS work.
 - Daemon: two clients share one store; idle exit; lock exclusivity; crash of
   client leaves daemon up.
 - MCP: tools list order; remember→recall→show round trip over stdio (or via
