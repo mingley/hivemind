@@ -207,11 +207,13 @@ pub(crate) fn recall(state: &State, query: &Query) -> Recall {
         .as_ref()
         .filter(|v| !v.is_empty() && !state.vectors.is_empty())
         .map(|qv| {
-            state.vectors.search(
-                qv,
-                query.vector_limit.unwrap_or(64),
-                query.vector_rescore.unwrap_or(32),
-            )
+            let limit = query.vector_limit.unwrap_or(64);
+            // Prefer LSH+rescoring when an ANN table was built for a large scope.
+            if state.vectors.ann_built() {
+                state.vectors.search_ann(qv, limit)
+            } else {
+                state.vectors.search(qv, limit, query.vector_rescore.unwrap_or(32))
+            }
         })
         .unwrap_or_default();
 

@@ -166,6 +166,30 @@ impl LexicalIndex {
         self.dict.len()
     }
 
+    pub fn total_token_length(&self) -> u64 {
+        self.total_len
+    }
+
+    pub fn doc_lengths(&self) -> &[u32] {
+        &self.doc_len
+    }
+
+    pub fn posting_lists(&self) -> &[Vec<(u32, u32)>] {
+        &self.postings
+    }
+
+    /// Dictionary entries in term-id order (`0..posting_lists().len()`).
+    pub fn terms_ordered(&self) -> Vec<&str> {
+        let n = self.postings.len();
+        let mut out: Vec<Option<&str>> = vec![None; n];
+        for (term, &id) in &self.dict {
+            out[id as usize] = Some(term);
+        }
+        out.into_iter()
+            .map(|slot| slot.unwrap_or_default())
+            .collect()
+    }
+
     /// BM25 score of every document matching at least one query term, in
     /// increasing document order. Scores accumulate in a dense array, which is
     /// much faster than a hash map when common terms touch many documents.

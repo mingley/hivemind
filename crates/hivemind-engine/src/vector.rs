@@ -5,9 +5,15 @@
 //! of the top candidates (`docs/04` D5). Real model inference plugs in behind
 //! [`Embedder`]; tests use [`HashEmbedder`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+
+/// Row count at or above which ANN search is meaningful (caller may still use exact [`VectorIndex::search`]).
+pub const ANN_ROW_THRESHOLD: usize = 64;
+const ANN_TABLES: usize = 12;
+const ANN_BITS_PER_TABLE: usize = 10;
+const ANN_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 
 /// Identifies an embedding model revision and layout.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -47,11 +53,69 @@ pub struct VectorRow {
     pub scale: Option<f32>,
 }
 
+/// LSH accelerator: random hyperplanes for cosine similarity (int8/F32 dot sign bits).
+#[derive(Debug, Default)]
+pub struct VectorAnn {
+    dims: usize,
+    tables: Vec<HashMap<u64, Vec<usize>>>,
+    /// Flattened hyperplanes: `tables.len()` × `bits` × `dims`.
+    planes: Vec<f32>,
+    bits: usize,
+}
+
+impl VectorAnn {
+    fn build(rows: &[VectorRow], dims: usize) -> Self {
+        let bits = ANN_BITS_PER_TABLE;
+        let mut planes = Vec::with_capacity(ANN_TABLES * bits * dims);
+        let mut tables: Vec<HashMap<u64, Vec<usize>>> = vec![HashMap::new(); ANN_TABLES];
+        let mut rng = SplitMix64::new(ANN_SEED);
+
+        for _ in 0..ANN_TABLES {
+            for _ in 0..bits {
+                for _ in 0..dims {
+                    planes.push(rng.unit_gaussian());
+                }
+            }
+        }
+
+        for (row_idx, row) in rows.iter().enumerate() {
+            for (t, table) in tables.iter_mut().enumerate() {
+                let key = hyperplane_hash(&planes, t, bits, dims, &row.values);
+                table.entry(key).or_default().push(row_idx);
+            }
+        }
+
+        Self {
+            dims,
+            tables,
+            planes,
+            bits,
+        }
+    }
+
+    fn candidates(&self, query: &[f32]) -> HashSet<usize> {
+        let mut out = HashSet::new();
+        for (t, table) in self.tables.iter().enumerate() {
+            let key = hyperplane_hash(&self.planes, t, self.bits, self.dims, query);
+            if let Some(ids) = table.get(&key) {
+                out.extend(ids.iter().copied());
+            }
+            for b in 0..self.bits {
+                if let Some(ids) = table.get(&(key ^ (1u64 << b))) {
+                    out.extend(ids.iter().copied());
+                }
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct VectorIndex {
     space: Option<EmbeddingSpace>,
     rows: Vec<VectorRow>,
     by_doc: HashMap<u32, usize>,
+    ann: Option<VectorAnn>,
 }
 
 impl VectorIndex {
@@ -116,6 +180,7 @@ impl VectorIndex {
             self.by_doc.insert(doc, self.rows.len());
             self.rows.push(row);
         }
+        self.ann = None;
         Ok(())
     }
 
@@ -159,6 +224,94 @@ impl VectorIndex {
         }
         scored.truncate(limit);
         scored
+    }
+
+    pub fn ann_built(&self) -> bool {
+        self.ann.is_some()
+    }
+
+    /// Build or rebuild the LSH tables from current rows (F32 space only).
+    pub fn build_ann(&mut self) -> Result<(), String> {
+        let space = self
+            .space
+            .as_ref()
+            .ok_or_else(|| "vector space is not set".to_owned())?;
+        if space.quantization != Quantization::F32 {
+            return Err("ANN build requires F32 quantization".into());
+        }
+        let dims = space.dims as usize;
+        self.ann = Some(VectorAnn::build(&self.rows, dims));
+        Ok(())
+    }
+
+    /// LSH candidate gathering plus exact cosine rescoring (same scoring as [`Self::search`] with `rescore=0`).
+    pub fn search_ann(&self, query: &[f32], limit: usize) -> Vec<(u32, f32)> {
+        if limit == 0 || query.is_empty() || self.rows.is_empty() {
+            return Vec::new();
+        }
+        if self.rows.len() < ANN_ROW_THRESHOLD {
+            return self.search(query, limit, 0);
+        }
+        let ann = match &self.ann {
+            Some(a) => a,
+            None => return self.search(query, limit, 0),
+        };
+        let candidate_idxs = ann.candidates(query);
+        if candidate_idxs.is_empty() {
+            return self.search(query, limit, 0);
+        }
+        let mut scored: Vec<(u32, f32)> = candidate_idxs
+            .into_iter()
+            .map(|idx| {
+                let row = &self.rows[idx];
+                (row.doc, cosine_f32(query, &row.values))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        scored.truncate(limit);
+        scored
+    }
+}
+
+fn hyperplane_hash(planes: &[f32], table: usize, bits: usize, dims: usize, vec: &[f32]) -> u64 {
+    let base = table * bits * dims;
+    let mut key = 0u64;
+    for b in 0..bits {
+        let off = base + b * dims;
+        let mut dot = 0.0f32;
+        for d in 0..dims {
+            dot += vec[d] * planes[off + d];
+        }
+        if dot >= 0.0 {
+            key |= 1u64 << b;
+        }
+    }
+    key
+}
+
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn unit_gaussian(&mut self) -> f32 {
+        let u1 = (self.next_u64() >> 11) as f32 / (1u64 << 53) as f32;
+        let u2 = (self.next_u64() >> 11) as f32 / (1u64 << 53) as f32;
+        let r = (-2.0 * u1.ln()).sqrt();
+        let theta = 2.0 * std::f32::consts::PI * u2;
+        r * theta.cos()
     }
 }
 
@@ -339,5 +492,34 @@ mod tests {
     fn rrf_merges_lists() {
         let fused = rrf_fuse(&[(1, 0.9), (2, 0.5)], &[(2, 0.8), (3, 0.7)], 60.0);
         assert_eq!(fused[0].0, 2);
+    }
+
+    #[test]
+    fn ann_search_overlaps_exact_top10() {
+        let embedder = HashEmbedder::new(64);
+        let mut index = VectorIndex::default();
+        index.set_space(embedder.space().clone()).unwrap();
+        for doc in 0..200u32 {
+            let text = format!(
+                "doc{doc} topic{} fragment{} {}",
+                doc % 17,
+                doc % 9,
+                if doc % 3 == 0 { "openssl macos" } else { "misc" }
+            );
+            index.upsert_f32(doc, embedder.embed(&text)).unwrap();
+        }
+        index.build_ann().unwrap();
+        let q = embedder.embed("openssl macos doc42");
+        let exact = index.search(&q, 10, 0);
+        let ann = index.search_ann(&q, 10);
+        let exact_docs: HashSet<u32> = exact.iter().map(|(d, _)| *d).collect();
+        let overlap = ann
+            .iter()
+            .filter(|(d, _)| exact_docs.contains(d))
+            .count();
+        assert!(
+            overlap >= 7,
+            "ANN top-10 should overlap exact top-10 (got {overlap}/10); exact={exact:?} ann={ann:?}"
+        );
     }
 }

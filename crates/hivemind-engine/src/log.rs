@@ -79,6 +79,19 @@ impl Log {
         dir: &Path,
         durability: Durability,
         segment_bytes: u64,
+        visit: impl FnMut(u64, &[u8]) -> Result<()>,
+    ) -> Result<(Self, Recovery)> {
+        Self::open_from(dir, durability, segment_bytes, 0, visit)
+    }
+
+    /// Like [`Log::open`], but only invokes `visit` for events with
+    /// `offset >= apply_from`. Earlier events are still validated. Used when
+    /// projections were loaded from a snapshot covering `[0, apply_from)`.
+    pub fn open_from(
+        dir: &Path,
+        durability: Durability,
+        segment_bytes: u64,
+        apply_from: u64,
         mut visit: impl FnMut(u64, &[u8]) -> Result<()>,
     ) -> Result<(Self, Recovery)> {
         fs::create_dir_all(dir)?;
@@ -113,7 +126,9 @@ impl Log {
                 match reader.step()? {
                     Step::Record => {
                         for (offset, event) in reader.events() {
-                            visit(offset, event)?;
+                            if offset >= apply_from {
+                                visit(offset, event)?;
+                            }
                             recovery.events += 1;
                         }
                         recovery.records += 1;

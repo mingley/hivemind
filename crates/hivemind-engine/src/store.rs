@@ -30,6 +30,8 @@ use crate::fsutil;
 use crate::lexical::DEFAULT_MAX_TERMS;
 use crate::log::{DEFAULT_SEGMENT_BYTES, Durability, Log, Recovery};
 use crate::recall::{self, Card, ClaimDetail, Flag, Query, Recall};
+use crate::indexseg::LexicalSegment;
+use crate::snapshot::{self, SnapshotInfo};
 use crate::state::{ArtifactRow, LeaseRow, State};
 use crate::vector::{Embedder, EmbeddingSpace};
 
@@ -240,7 +242,10 @@ pub struct Store {
     state: RwLock<State>,
     blobs: BlobStore,
     recovery: Recovery,
+    /// Log offset covered by the snapshot applied at open (`0` if none).
+    snapshot_offset: u64,
     embedder: Mutex<Option<Arc<dyn Embedder>>>,
+    durability: Durability,
     _lock: File,
 }
 
@@ -274,16 +279,32 @@ impl Store {
         let sync = options.durability == Durability::Fsync;
         let existing = read_manifest(&dir)?;
         let mut state = State::new(options.max_terms);
-        let (log, recovery) = Log::open(
+        let mut snapshot_offset = 0u64;
+        if let Some(snap) = snapshot::load_latest(&dir.join("snapshots"))? {
+            for (offset, bytes) in &snap.events {
+                let event = codec::decode(*offset, bytes)?;
+                state.apply(*offset, &event);
+            }
+            snapshot_offset = snap.next_offset;
+        }
+        let (log, recovery) = Log::open_from(
             &dir.join("log"),
             options.durability,
             options.segment_bytes,
+            snapshot_offset,
             |offset, bytes| {
                 let event = codec::decode(offset, bytes)?;
                 state.apply(offset, &event);
                 Ok(())
             },
         )?;
+        if snapshot_offset > log.next_offset() {
+            return Err(Error::Format(format!(
+                "{} snapshot covers offset {snapshot_offset} but the log ends at {}",
+                dir.display(),
+                log.next_offset()
+            )));
+        }
         let blobs = BlobStore::open(dir.join("blobs"), options.durability)?;
         if sync {
             // Make `log/` and `blobs/` themselves durable before anything in them
@@ -316,7 +337,9 @@ impl Store {
             state: RwLock::new(state),
             blobs,
             recovery,
+            snapshot_offset,
             embedder: Mutex::new(None),
+            durability: options.durability,
             _lock: lock,
         };
         if store.recovery.truncated_bytes > 0 {
@@ -346,6 +369,54 @@ impl Store {
 
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    /// Log offset covered by the snapshot loaded at open (`0` if none).
+    pub fn snapshot_offset(&self) -> u64 {
+        self.snapshot_offset
+    }
+
+    /// Freeze the current in-memory lexical index to an immutable mmap segment
+    /// under `indexes/lexical-<next_offset>.seg` (for RSS experiments / sealed scopes).
+    pub fn seal_lexical(&self) -> Result<PathBuf> {
+        let state = self.state.read();
+        let offset = state.next_offset;
+        let dir = self.dir.join("indexes");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("lexical-{offset:020}.seg"));
+        LexicalSegment::write_sealed(&path, &state.lexical)?;
+        Ok(path)
+    }
+
+    /// Build the LSH ANN accelerator over current vectors (no-op if empty).
+    pub fn build_ann(&self) -> Result<()> {
+        let mut state = self.state.write();
+        if state.vectors.is_empty() {
+            return Ok(());
+        }
+        state.vectors.build_ann().map_err(Error::Invalid)
+    }
+
+    /// Write a projection checkpoint covering every acknowledged event so far.
+    /// Subsequent opens apply the pack and skip re-applying those log offsets.
+    pub fn checkpoint(&self) -> Result<SnapshotInfo> {
+        let log = self.log.lock();
+        let view = log.view();
+        let next_offset = view.end();
+        let mut events = Vec::with_capacity(next_offset as usize);
+        view.scan(0, |offset, bytes| {
+            if offset >= next_offset {
+                return Ok(false);
+            }
+            events.push((offset, bytes.to_vec()));
+            Ok(true)
+        })?;
+        snapshot::write(
+            &self.dir.join("snapshots"),
+            next_offset,
+            &events,
+            self.durability,
+        )
     }
 
     /// What recovery found when the store was opened.
