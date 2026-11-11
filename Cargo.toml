@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/hivemind-core", "crates/hivemind-engine", "crates/hivemind"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+repository = "https://github.com/mingley/hivemind"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
