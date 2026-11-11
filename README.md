@@ -10,8 +10,8 @@ and tokens**, with enough provenance that agents can verify what they
 retrieve. It runs as a lean local daemon on a laptop and is designed to grow
 into a shared service.
 
-> **Status (2026-11-11):** research done; M0–M3 are built and tested (engine,
-> daemon/MCP, `hivebench`, citations/leases/import-export).
+> **Status (2026-11-11):** research done; M0–M4 are built and tested (engine,
+> daemon/MCP, `hivebench`, citations/leases/import-export, hybrid retrieval).
 > Several agents on one machine can share a store over stdio MCP
 > (`hivemind mcp` → `hivemindd`). This is **not** production-ready: no
 > remote/auth story, post-mitigation RSS not yet re-measured against the

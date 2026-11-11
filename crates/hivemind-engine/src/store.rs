@@ -29,7 +29,7 @@ use crate::error::{Error, Result};
 use crate::fsutil;
 use crate::lexical::DEFAULT_MAX_TERMS;
 use crate::log::{DEFAULT_SEGMENT_BYTES, Durability, Log, Recovery};
-use crate::recall::{self, Card, ClaimDetail, Query, Recall};
+use crate::recall::{self, Card, ClaimDetail, Flag, Query, Recall};
 use crate::state::{ArtifactRow, LeaseRow, State};
 use crate::vector::{Embedder, EmbeddingSpace};
 
@@ -383,6 +383,16 @@ impl Store {
                         return Err(Error::Conflict(format!(
                             "{old} is {}; only active claims can be superseded",
                             row.status
+                        )));
+                    }
+                    // C6: supersede only when applicability contexts match; otherwise
+                    // keep a sibling and link with contrasts_with.
+                    if let Some(diff) =
+                        context_contrast_keys(&row.applies_when, &data.applies_when)
+                    {
+                        return Err(Error::Conflict(format!(
+                            "{old} applies under different conditions ({}); write a sibling and link with contrasts_with instead of superseding",
+                            diff.join(", ")
                         )));
                     }
                 }
@@ -748,7 +758,12 @@ impl Store {
                 let other = &state.claims[doc as usize];
                 // Compare conditions: a similar claim under other conditions shows as a mismatch.
                 let applies = applicability::evaluate(&other.applies_when, &row.applies_when);
-                recall::card(&state, other, score / own, applies, now)
+                let mut card = recall::card(&state, other, score / own, applies, now);
+                if let Some(keys) = context_contrast_keys(&other.applies_when, &row.applies_when) {
+                    card.flags.push(Flag::ContextContrast);
+                    card.differs_in = keys;
+                }
+                card
             })
             .collect()
     }
@@ -1221,6 +1236,31 @@ fn default_review_by(kind: ClaimKind, now: Timestamp) -> Option<Timestamp> {
             Some(now.plus_days(180))
         }
         ClaimKind::Decision | ClaimKind::Preference => None,
+    }
+}
+
+/// Keys where two applicability maps disagree (present in both, different values).
+/// `None` means compatible for supersession (C6).
+fn context_contrast_keys(
+    a: &std::collections::BTreeMap<String, String>,
+    b: &std::collections::BTreeMap<String, String>,
+) -> Option<Vec<String>> {
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    let mut keys = Vec::new();
+    for (key, av) in a {
+        if let Some(bv) = b.get(key)
+            && av != bv
+        {
+            keys.push(key.clone());
+        }
+    }
+    if keys.is_empty() {
+        None
+    } else {
+        keys.sort();
+        Some(keys)
     }
 }
 

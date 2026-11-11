@@ -83,6 +83,8 @@ pub enum Flag {
     CitationDrifted,
     /// At least one code citation is missing or unreadable.
     CitationBroken,
+    /// Near-duplicate that applies under different conditions (C5).
+    ContextContrast,
 }
 
 /// The L0 view of a claim: enough to decide whether to expand it.
@@ -105,6 +107,9 @@ pub struct Card {
     pub superseded_by: Option<ClaimId>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub conflicts_with: Vec<ClaimId>,
+    /// Condition keys that distinguish this claim from a near-duplicate (C5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub differs_in: Vec<String>,
     pub score: f32,
 }
 
@@ -401,6 +406,14 @@ fn row_multiplier(row: &ClaimRow, applicability: &Applicability, now: Timestamp)
         let age = now.days_since(row.recorded_at).max(0.0);
         m *= 0.75 + 0.25 * 0.5f64.powf(age / half_life) as f32;
     }
+    // C14: ACT-R-style activation — log uses minus decay since last validation.
+    let uses = row.feedback.helpful as f64;
+    let since_use = row
+        .last_validated_at
+        .map(|t| now.days_since(t).max(0.0))
+        .unwrap_or_else(|| now.days_since(row.recorded_at).max(0.0));
+    let activation = (1.0 + uses).ln() - 0.5 * (since_use / 30.0);
+    m *= (1.0 + 0.1 * activation.clamp(-2.0, 3.0)) as f32;
     let f = &row.feedback;
     m *= (1.0 + 0.05 * f.helpful.min(5) as f32)
         * 0.9f32.powi(f.unhelpful.min(5) as i32)
@@ -478,6 +491,7 @@ fn card_with_prior(
         flags,
         superseded_by: row.superseded_by,
         conflicts_with: belief.conflicts,
+        differs_in: Vec::new(),
         score,
     }
 }
@@ -628,6 +642,7 @@ pub fn render_card(card: &Card) -> String {
             Flag::Truncated => "truncated",
             Flag::CitationDrifted => "citation drifted",
             Flag::CitationBroken => "citation broken",
+            Flag::ContextContrast => "differs in context",
             Flag::Disputed | Flag::Historical => unreachable!(),
         })
         .collect();

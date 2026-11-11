@@ -55,6 +55,8 @@ str_enum! {
         Refines => "refines",
         Related => "related",
         DependsOn => "depends_on",
+        /// Near-duplicate claims that differ by applicability context (C5).
+        ContrastsWith => "contrasts_with",
     }
 }
 

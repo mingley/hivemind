@@ -1,6 +1,6 @@
 # 06: Build plan, milestones, and open questions
 
-Status: v0.6 (2026-11-11). M0–M3 are done; M4 is next. Written after the
+Status: v0.7 (2026-11-11). M0–M4 are done; M5 is next. Written after the
 build decision ([04](04-architecture-and-decisions.md#decision-summary)). Each
 milestone ends with something usable, a test or benchmark that would expose
 failure, and an explicit list of what it does **not** prove.
@@ -212,6 +212,27 @@ Working notes: [m2-implementation-notes.md](m2-implementation-notes.md).
 **What this proves / does not prove:** staleness signals, coordination leases,
 and exchange formats exist and are tested. It does not prove F5 outcome gains
 against baselines, nor shared-service security (M5).
+
+## M4 status: retrieval depth (done 2026-11-11)
+
+**Built:**
+
+- **Embedding spaces:** `EmbeddingSpace` + `Embedder` trait; in-process
+  `HashEmbedder` (pure Rust) for tests and dry-runs; `Store::set_embedder`
+  reindexes claims into an in-memory vector index.
+- **Exact quantized scan:** f32 cosine and int8 codes with f32 rescoring
+  (`VectorIndex`).
+- **Fusion:** reciprocal-rank fusion of lexical BM25 and vector hits
+  (`rank-v1`).
+- **Hippocampal mechanisms (from [08](08-hippocampal-design.md)):**
+  write-time key expansion (C1), entity boost (C8), temporal neighbors (C9),
+  salience weighting (C3), abstention via `min_score` (C18),
+  `contrasts_with` + `differs_in` (C5), supersede only when applicability
+  matches (C6), ACT-R-style activation in ranking (C14).
+
+**What this proves / does not prove:** hybrid retrieval plumbing and the cheap
+deterministic hippocampal knobs. It does not ship a production embedding
+model weights file (plug any `Embedder` in), ANN, or F4 online quality wins.
 
 ## Open questions
 
