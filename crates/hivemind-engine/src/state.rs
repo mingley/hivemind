@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use hivemind_core::{
     Actor, ActorKind, BELIEF_POLICY, BlobHash, ClaimData, ClaimId, EdgeKind, Event, EventBody,
-    EventId, EvidenceRef, Method, Origin, Outcome, RetractReason, Status, Timestamp, TrustTier,
+    EventId, EvidenceRef, Origin, Outcome, RetractReason, Status, Timestamp, TrustTier,
     Verification,
 };
 use serde::Serialize;
@@ -73,7 +73,10 @@ pub struct ClaimRow {
     pub feedback: FeedbackTally,
     /// Last validated use: helpful feedback with evidence, or a human confirmation.
     pub last_validated_at: Option<Timestamp>,
-    pub human_verified: bool,
+    /// The author was a human. Never inferred from writer-chosen labels.
+    pub authored_by_human: bool,
+    /// A human confirmed the claim through helpful feedback.
+    pub reviewed_by_human: bool,
     supports: Vec<Support>,
 }
 
@@ -136,6 +139,8 @@ pub struct State {
     idempotency: HashMap<(String, String), Ack>,
     pub(crate) lexical: LexicalIndex,
     pub(crate) next_offset: u64,
+    /// `(offset, truncated bytes)` of every recorded recovery.
+    pub(crate) recoveries: Vec<(u64, u64)>,
     /// Events that referenced unknown records during replay. Writes are
     /// validated before they reach the log, so this stays zero unless the log
     /// was edited by hand.
@@ -265,7 +270,7 @@ impl State {
                             });
                         }
                         if by.kind == ActorKind::Human {
-                            row.human_verified = true;
+                            row.reviewed_by_human = true;
                             row.last_validated_at = Some(at);
                         }
                     }
@@ -275,6 +280,9 @@ impl State {
                 },
                 None => known = false,
             },
+            EventBody::Recovered { truncated_bytes } => {
+                self.recoveries.push((offset, *truncated_bytes));
+            }
             EventBody::ArtifactStored {
                 hash,
                 size,
@@ -335,7 +343,8 @@ impl State {
                 evidence: provenance.evidence_keys().into_iter().collect(),
             });
         }
-        let human = event.actor.kind == ActorKind::Human || provenance.method == Method::Human;
+        // `provenance.method` is a label the writer chooses, so it never grants trust.
+        let authored_by_human = event.actor.kind == ActorKind::Human;
         self.lexical.add(doc, &data.index_text());
         for entity in &data.about {
             self.by_entity.entry(entity.clone()).or_default().push(doc);
@@ -357,8 +366,9 @@ impl State {
             invalidation: None,
             tainted,
             feedback: FeedbackTally::default(),
-            last_validated_at: human.then_some(event.recorded_at),
-            human_verified: human,
+            last_validated_at: (authored_by_human && !tainted).then_some(event.recorded_at),
+            authored_by_human,
+            reviewed_by_human: false,
             supports,
         });
     }
@@ -390,12 +400,15 @@ impl State {
             self.edges_by_claim.entry(to).or_default().push(index);
         }
         if kind == EdgeKind::Supports {
-            // Support from another claim counts as evidence from that claim's author.
+            // Support is credited to whoever adds the edge. The source claim's
+            // evidence counts only when that same principal wrote it, so nobody
+            // can borrow someone else's evidence to corroborate their own claim.
             let source = self.row(&from).expect("checked by caller");
-            let mut keys: BTreeSet<String> =
-                source.data.provenance.evidence_keys().into_iter().collect();
-            keys.extend(evidence.iter().map(EvidenceRef::key));
-            let principal = source.author.principal.clone();
+            let principal = event.actor.principal.clone();
+            let mut keys: BTreeSet<String> = evidence.iter().map(EvidenceRef::key).collect();
+            if source.author.principal == principal {
+                keys.extend(source.data.provenance.evidence_keys());
+            }
             if !keys.is_empty() {
                 let target = self.row_mut(&to).expect("checked by caller");
                 target.supports.push(Support {
@@ -406,15 +419,22 @@ impl State {
         }
     }
 
-    /// Derives verification and trust under [`BELIEF_POLICY`].
+    /// Derives verification and trust under [`BELIEF_POLICY`] (`belief-v1`):
     ///
-    /// - **Verified:** confirmed by a human.
-    /// - **Disputed:** an active claim contradicts it.
+    /// - **Human review:** a human authored the claim (and it isn't derived
+    ///   from external content), or a human confirmed it through helpful
+    ///   feedback. That makes it `verified` with `human` trust.
+    /// - **Disputed:** otherwise, an active claim contradicts it.
     /// - **Corroborated:** two or more independent evidence groups.
-    /// - Trust is capped at `untrusted` for claims derived from external
-    ///   content, until another principal corroborates them with independent
-    ///   evidence.
+    /// - **Taint:** claims derived from external content are `untrusted` until
+    ///   another principal corroborates them, or a human reviews them.
+    /// - **Derived minimum:** without human review, a derived claim is never
+    ///   trusted more than its least trusted input.
     pub fn belief(&self, row: &ClaimRow) -> Belief {
+        self.belief_at(row, 0)
+    }
+
+    fn belief_at(&self, row: &ClaimRow, depth: usize) -> Belief {
         let conflicts: BTreeSet<ClaimId> = self
             .edges_of(&row.id)
             .filter(|edge| edge.kind == EdgeKind::Contradicts)
@@ -430,7 +450,8 @@ impl State {
             })
             .collect();
         let independent = independent_groups(&row.supports);
-        let verification = if row.human_verified {
+        let human_review = row.reviewed_by_human || (row.authored_by_human && !row.tainted);
+        let verification = if human_review {
             Verification::Verified
         } else if !conflicts.is_empty() {
             Verification::Disputed
@@ -439,7 +460,7 @@ impl State {
         } else {
             Verification::Unverified
         };
-        let trust = if row.human_verified {
+        let mut trust = if human_review {
             TrustTier::Human
         } else if row.tainted {
             if independent >= 2 {
@@ -452,6 +473,15 @@ impl State {
         } else {
             TrustTier::Agent
         };
+        if !human_review {
+            for input in &row.data.provenance.derived_from {
+                let input_trust = match self.row(input) {
+                    Some(r) if depth < MAX_DERIVATION_DEPTH => self.belief_at(r, depth + 1).trust,
+                    _ => TrustTier::Untrusted,
+                };
+                trust = trust.min(input_trust);
+            }
+        }
         Belief {
             policy: BELIEF_POLICY,
             verification,
@@ -461,6 +491,10 @@ impl State {
         }
     }
 }
+
+/// Derivation chains deeper than this are treated as untrusted rather than
+/// walked further.
+const MAX_DERIVATION_DEPTH: usize = 8;
 
 /// Counts groups of supports that share neither a principal nor any evidence.
 /// Ten agents restating one log line are one group.

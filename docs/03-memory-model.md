@@ -231,7 +231,10 @@ Other operations:
   - `corroborated`: independent support from a different principal with its
     own evidence, or a passing check such as a green build after applying the
     fix.
-  - `verified`: a human, or a reproducible test referenced as evidence.
+  - `verified`: reviewed by a human. Either an authenticated human authored
+    it (and it isn't derived from external content), or a human confirmed it
+    through feedback. Labels the writer chooses, such as `method: human`,
+    never grant it.
   - `disputed`: there is an open `contradicts` edge.
 - **Trust tiers:**
   - `untrusted`: every piece of evidence is external content such as web
@@ -242,9 +245,10 @@ Other operations:
 
   Tiers control **promotion to wider scopes** and **presentation**. Untrusted
   claims render in a quarantined block and never as instructions.
-- **Taint propagates.** A derived claim's trust tier is the **minimum** of its
-  inputs' tiers, so consolidation cannot launder untrusted text into trusted
-  memory. One residual risk remains: an agent can paraphrase untrusted text it
+- **Taint propagates.** Without a human review, a derived claim's trust tier
+  is the **minimum** of its inputs' tiers, so consolidation cannot launder
+  untrusted text into trusted memory. A human *authoring* external content
+  doesn't lift its taint; only an explicit human review does. One residual risk remains: an agent can paraphrase untrusted text it
   read earlier into a "self-authored" claim. Catching that needs session-level
   taint tracking. That is an open problem, and experiment F12 measures it
   ([research/06](../research/06-architecture-distribution-protocols-security.md#83-threat-model-table)).
@@ -254,7 +258,9 @@ Other operations:
   Unicode is stripped at ingest.
 - **Repetition is not corroboration.** Ten agents restating one log line is one
   piece of evidence. Corroboration counts **independent evidence groups**:
-  claims that share evidence fall into the same group. KIP states the same rule
+  claims that share evidence fall into the same group. A `supports` edge is
+  credited to whoever adds it, so nobody can borrow another principal's
+  evidence to corroborate their own claim. KIP states the same rule
   ([research/01](../research/01-agent-memory-systems-rust.md#31-andadb-anda-framework-kip-and-anda-brain-ldclabs)).
 - **Belief is computed, not stored.** Verification status, trust tier, and
   confidence are **derived** at read time from evidence, edges, and feedback by

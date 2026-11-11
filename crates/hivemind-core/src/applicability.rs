@@ -73,7 +73,17 @@ fn condition_holds(key: &str, expected: &str, actual: &str) -> Option<bool> {
     if VERSION_KEY_PREFIXES.iter().any(|p| key.starts_with(p)) {
         let requirement = semver::VersionReq::parse(expected.trim()).ok()?;
         let version = lenient_version(actual)?;
-        return Some(requirement.matches(&version));
+        if requirement.matches(&version) {
+            return Some(true);
+        }
+        if version.pre.is_empty() {
+            return Some(false);
+        }
+        // Semver hides prereleases (1.80.0-nightly) from ranges that don't
+        // name them. Judge them by their base version instead, and call the
+        // edges unknown rather than hide a claim that may apply.
+        let base = semver::Version::new(version.major, version.minor, version.patch);
+        return requirement.matches(&base).then_some(true);
     }
     let actual = normalize(key, actual);
     Some(expected.split('|').any(|alternative| {
@@ -174,6 +184,25 @@ mod tests {
         assert!(evaluate(&conditions, &outside).is_mismatch());
         // 0.9.0 is below the range.
         assert!(evaluate(&conditions, &short).is_mismatch());
+    }
+
+    #[test]
+    fn prerelease_toolchains_match_by_base_version() {
+        let conditions = map(&[("toolchain:rust", ">=1.65")]);
+        for nightly in ["1.80.0-nightly", "1.82.0-beta.3"] {
+            let context = map(&[("toolchain:rust", nightly)]);
+            assert_eq!(
+                evaluate(&conditions, &context),
+                Applicability::Match,
+                "{nightly}"
+            );
+        }
+        let below = map(&[("toolchain:rust", "<1.80")]);
+        let context = map(&[("toolchain:rust", "1.80.0-nightly")]);
+        assert!(matches!(
+            evaluate(&below, &context),
+            Applicability::Unknown { .. }
+        ));
     }
 
     #[test]

@@ -119,4 +119,56 @@ fn rejects_secrets_and_bad_input_with_clear_errors() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid scope"));
+
+    let output = hivemind(tmp.path())
+        .args([
+            "remember",
+            "Cache warmup takes 5 minutes",
+            "--scope",
+            "project:a",
+            "--review-by",
+            "9000y",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "far-future times are rejected");
+}
+
+#[test]
+fn prerelease_toolchains_still_match() {
+    let tmp = tempfile::tempdir().unwrap();
+    run(hivemind(tmp.path()).args([
+        "remember",
+        "rustdoc --check-cfg needs rust 1.65 or newer",
+        "--scope",
+        "project:a",
+        "--when",
+        "toolchain:rust=>=1.65",
+    ]));
+    let hits = json(hivemind(tmp.path()).args([
+        "recall",
+        "check-cfg",
+        "--ctx",
+        "toolchain:rust=1.80.0-nightly",
+    ]));
+    assert_eq!(hits["cards"].as_array().unwrap().len(), 1);
+    assert_eq!(hits["cards"][0]["applicability"]["state"], "match");
+}
+
+#[test]
+fn torn_writes_are_reported_on_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    run(hivemind(tmp.path()).args(["remember", "first claim", "--scope", "project:a"]));
+    let segment = tmp.path().join("log").join("00000000000000000000.hlog");
+    let mut bytes = std::fs::read(&segment).unwrap();
+    bytes.extend_from_slice(&[0x5a; 21]);
+    std::fs::write(&segment, bytes).unwrap();
+    let output = hivemind(tmp.path())
+        .args(["recall", "first"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("removed 21 bytes"));
+    let stats = json(hivemind(tmp.path()).arg("stats"));
+    assert_eq!(stats["recoveries"].as_array().unwrap().len(), 1);
 }

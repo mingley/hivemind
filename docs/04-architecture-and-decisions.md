@@ -331,17 +331,25 @@ payload:               codec u8 (1 = JSON v1) ‖ encoded event
    Concurrent writes share one fsync through group commit.
 2. **New segment files and blobs are durable before they are referenced:**
    write to a temporary file, fsync it, rename it, then fsync the directory.
-3. **Recovery:**
+   - Storing a blob that already exists also flushes its directories, since
+     another writer's rename may not be durable yet.
+   - The store directory is flushed after `log/` and `blobs/` exist.
+   - The MANIFEST is written **last**, so a MANIFEST whose log is missing is
+     an error, never a silently empty store.
+3. **Nothing is acknowledged that replay couldn't decode.** Each encoded event
+   is decoded before it is appended, so an accepted write can never leave a
+   store that refuses to reopen.
+4. **Recovery:**
    - Records are scanned in order, checking each checksum and that offsets
      are contiguous.
-   - A torn or invalid tail in the **last** segment is truncated, logged, and
-     fsynced.
+   - A torn or invalid tail in the **last** segment is truncated, fsynced, and
+     recorded as a `recovered` event in the log. The CLI also warns about it.
    - Corruption anywhere else stops the open with a precise error. A
      separate `repair` command handles it; recovery never repairs silently.
-4. **Projections are never trusted over the log.** At startup they are rebuilt
+5. **Projections are never trusted over the log.** At startup they are rebuilt
    from the log, or loaded from a snapshot that records its offset and is
    verified against the log.
-5. **A `--no-fsync` mode exists for tests and benchmarks only,** and its
+6. **A `--no-fsync` mode exists for tests and benchmarks only,** and its
    output is labeled as such.
 
 ### Projections (v0, in memory)

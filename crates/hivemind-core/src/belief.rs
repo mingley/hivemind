@@ -4,7 +4,7 @@
 
 /// Name of the policy that derives [`Verification`] and [`TrustTier`]. Changing
 /// the rules means a new name, so results stay explainable.
-pub const BELIEF_POLICY: &str = "belief-v0";
+pub const BELIEF_POLICY: &str = "belief-v1";
 
 str_enum! {
     /// Lifecycle status, set only by lifecycle events.
@@ -26,7 +26,8 @@ str_enum! {
         Unverified => "unverified",
         /// Two or more independent evidence groups.
         Corroborated => "corroborated",
-        /// Confirmed by a human, or by a reproducible check referenced as evidence.
+        /// Reviewed by a human: authored by one (unless derived from external
+        /// content) or confirmed by one through feedback.
         Verified => "verified",
         /// An active claim contradicts this one.
         Disputed => "disputed",

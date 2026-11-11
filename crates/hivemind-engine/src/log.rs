@@ -56,6 +56,8 @@ pub struct Recovery {
     pub events: u64,
     /// Bytes of an unacknowledged, torn append removed from the last segment.
     pub truncated_bytes: u64,
+    /// The log didn't exist and was created by this open.
+    pub created: bool,
 }
 
 #[derive(Debug)]
@@ -81,13 +83,15 @@ impl Log {
     ) -> Result<(Self, Recovery)> {
         fs::create_dir_all(dir)?;
         let mut segments = list_segments(dir)?;
-        if segments.is_empty() {
+        let created = segments.is_empty();
+        if created {
             create_segment(dir, 0, durability)?;
             segments.push(0);
         }
 
         let mut recovery = Recovery {
             segments: segments.len(),
+            created,
             ..Recovery::default()
         };
         let mut expected = 0u64;

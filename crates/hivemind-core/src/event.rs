@@ -137,6 +137,9 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         evidence: Vec<EvidenceRef>,
     },
+    /// Recovery removed a torn, unacknowledged write from the end of the log
+    /// when the store was opened. Recorded so the repair is never silent.
+    Recovered { truncated_bytes: u64 },
     /// Records an artifact written to the blob store. The blob is durable before
     /// this event is appended.
     ArtifactStored {
@@ -159,6 +162,7 @@ impl EventBody {
             EventBody::EdgeAdded { .. } => "edge_added",
             EventBody::FeedbackRecorded { .. } => "feedback_recorded",
             EventBody::ArtifactStored { .. } => "artifact_stored",
+            EventBody::Recovered { .. } => "recovered",
         }
     }
 
@@ -170,7 +174,7 @@ impl EventBody {
             | EventBody::ClaimRetracted { claim, .. }
             | EventBody::FeedbackRecorded { claim, .. } => Some(*claim),
             EventBody::EdgeAdded { from, .. } => Some(*from),
-            EventBody::ArtifactStored { .. } => None,
+            EventBody::ArtifactStored { .. } | EventBody::Recovered { .. } => None,
         }
     }
 }

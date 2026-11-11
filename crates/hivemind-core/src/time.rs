@@ -6,6 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 const MS_PER_DAY: i64 = 86_400_000;
+/// 9999-12-31T23:59:59.999Z: the last instant RFC 3339 can express.
+pub const MAX_MILLIS: i64 = 253_402_300_799_999;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
@@ -33,6 +35,12 @@ impl Timestamp {
         self.0
     }
 
+    /// Whether the timestamp falls between 1970 and the year 9999, the range
+    /// that RFC 3339 output covers. Stored timestamps must be representable.
+    pub const fn is_representable(self) -> bool {
+        self.0 >= 0 && self.0 <= MAX_MILLIS
+    }
+
     pub fn plus_days(self, days: i64) -> Self {
         Self(self.0.saturating_add(days.saturating_mul(MS_PER_DAY)))
     }
@@ -51,17 +59,36 @@ impl Timestamp {
     }
 
     pub fn to_rfc3339(self) -> String {
-        humantime::format_rfc3339_millis(self.to_system_time()).to_string()
+        if self.is_representable() {
+            humantime::format_rfc3339_millis(self.to_system_time()).to_string()
+        } else {
+            format!("@{}ms", self.0)
+        }
     }
 
-    /// `YYYY-MM-DD`.
+    /// `YYYY-MM-DD`, or the raw form for unrepresentable timestamps.
     pub fn date(self) -> String {
-        self.to_rfc3339()[..10].to_owned()
+        let text = self.to_rfc3339();
+        if self.is_representable() {
+            text[..10].to_owned()
+        } else {
+            text
+        }
     }
 
     /// Parses RFC 3339, a bare date (midnight UTC), or a duration such as
-    /// `90d` or `2h`, which is added to `now`.
+    /// `90d` or `2h`, which is added to `now`. Results outside 1970–9999 are
+    /// rejected.
     pub fn parse_relative(input: &str, now: Timestamp) -> Result<Self, TimeParseError> {
+        let parsed = Self::parse_unchecked(input, now)?;
+        if parsed.is_representable() {
+            Ok(parsed)
+        } else {
+            Err(TimeParseError(input.to_owned()))
+        }
+    }
+
+    fn parse_unchecked(input: &str, now: Timestamp) -> Result<Self, TimeParseError> {
         let s = input.trim();
         let rfc3339 = if s.len() == 10 && s.as_bytes().get(4) == Some(&b'-') {
             format!("{s}T00:00:00Z")
@@ -109,6 +136,16 @@ mod tests {
         let later = Timestamp::parse_relative("90d", now).unwrap();
         assert_eq!(later, now.plus_days(90));
         assert!(Timestamp::parse_relative("next tuesday", now).is_err());
+    }
+
+    #[test]
+    fn far_future_and_negative_times_are_rejected_and_never_panic() {
+        let now = Timestamp::from_millis(1_000_000);
+        assert!(Timestamp::parse_relative("9000y", now).is_err());
+        let huge = Timestamp::from_millis(i64::MAX);
+        assert!(!huge.is_representable());
+        assert!(huge.to_rfc3339().starts_with('@'));
+        assert!(Timestamp::from_millis(-5).date().starts_with('@'));
     }
 
     #[test]

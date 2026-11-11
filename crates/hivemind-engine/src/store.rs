@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use hivemind_core::applicability::{self, Context};
 use hivemind_core::hygiene;
 use hivemind_core::{
-    Actor, BlobHash, ClaimData, ClaimId, EVENT_VERSION, EdgeKind, Event, EventBody, EventId,
-    EvidenceRef, Origin, Outcome, RetractReason, Status, Timestamp,
+    Actor, ActorKind, BlobHash, ClaimData, ClaimId, EVENT_VERSION, EdgeKind, Event, EventBody,
+    EventId, EvidenceRef, Origin, Outcome, RetractReason, Status, Timestamp,
 };
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -112,6 +112,9 @@ pub struct Stats {
     pub log_segments: usize,
     pub log_bytes: u64,
     pub skipped_events: u64,
+    /// Repairs recorded in the log: `(offset, truncated bytes)`.
+    pub recoveries: Vec<(u64, u64)>,
+    /// What recovery found when this process opened the store.
     pub recovery: Recovery,
 }
 
@@ -158,7 +161,7 @@ impl Store {
             Err(TryLockError::Error(e)) => return Err(e.into()),
         }
         let sync = options.durability == Durability::Fsync;
-        let manifest = load_or_create_manifest(&dir, sync)?;
+        let existing = read_manifest(&dir)?;
         let mut state = State::default();
         let (log, recovery) = Log::open(
             &dir.join("log"),
@@ -171,7 +174,31 @@ impl Store {
             },
         )?;
         let blobs = BlobStore::open(dir.join("blobs"), options.durability)?;
-        Ok(Self {
+        if sync {
+            // Make `log/` and `blobs/` themselves durable before anything in them
+            // is acknowledged.
+            fsutil::sync_dir(&dir)?;
+        }
+        // The MANIFEST is written last, so its presence proves the log was
+        // created durably. A MANIFEST without a log means the log was lost.
+        let manifest = match existing {
+            Some(manifest) if recovery.created => {
+                return Err(Error::Format(format!(
+                    "{} has a MANIFEST for store {} but its log is missing; refusing to start an empty log",
+                    dir.display(),
+                    manifest.store_id
+                )));
+            }
+            Some(manifest) => manifest,
+            None if log.next_offset() > 0 => {
+                return Err(Error::Format(format!(
+                    "{} has a log with events but no MANIFEST",
+                    dir.display()
+                )));
+            }
+            None => create_manifest(&dir, sync)?,
+        };
+        let store = Self {
             dir,
             manifest,
             log: Mutex::new(log),
@@ -179,7 +206,26 @@ impl Store {
             blobs,
             recovery,
             _lock: lock,
-        })
+        };
+        if store.recovery.truncated_bytes > 0 {
+            store.record_recovery()?;
+        }
+        Ok(store)
+    }
+
+    /// Appends a `recovered` event so a repair made at open is never silent.
+    fn record_recovery(&self) -> Result<()> {
+        let actor = Actor {
+            principal: "hivemind".into(),
+            kind: ActorKind::Service,
+            agent: Some("recovery".into()),
+            session: None,
+        };
+        let truncated_bytes = self.recovery.truncated_bytes;
+        self.commit_event(&actor, None, |_| {
+            Ok(EventBody::Recovered { truncated_bytes })
+        })?;
+        Ok(())
     }
 
     pub fn dir(&self) -> &Path {
@@ -304,6 +350,13 @@ impl Store {
         if reason.trim().is_empty() {
             return Err(Error::Invalid(
                 "give a reason for invalidating the claim".into(),
+            ));
+        }
+        if let Some(at) = at
+            && !at.is_representable()
+        {
+            return Err(Error::Invalid(
+                "`at` must fall between 1970 and the year 9999".into(),
             ));
         }
         self.commit_event(actor, idempotency_key, |state| {
@@ -466,6 +519,10 @@ impl Store {
             body,
         };
         let bytes = codec::encode(&event)?;
+        // Never acknowledge an event that replay couldn't decode: that would
+        // leave a store that refuses to reopen.
+        codec::decode(log.next_offset(), &bytes)
+            .map_err(|e| Error::Invalid(format!("write would not survive replay: {e}")))?;
         let offset = log.append(&[bytes])?;
         let claim = match &event.body {
             EventBody::ClaimAsserted { claim, .. } => Some(*claim),
@@ -603,6 +660,7 @@ impl Store {
             log_segments: view.segment_count(),
             log_bytes: view.bytes(),
             skipped_events: state.skipped,
+            recoveries: state.recoveries.clone(),
             recovery: self.recovery.clone(),
         }
     }
@@ -647,9 +705,8 @@ impl Store {
     }
 }
 
-fn load_or_create_manifest(dir: &Path, sync: bool) -> Result<Manifest> {
-    let path = dir.join(MANIFEST);
-    match fs::read(&path) {
+fn read_manifest(dir: &Path) -> Result<Option<Manifest>> {
+    match fs::read(dir.join(MANIFEST)) {
         Ok(bytes) => {
             let manifest: Manifest = serde_json::from_slice(&bytes)
                 .map_err(|e| Error::Format(format!("unreadable MANIFEST: {e}")))?;
@@ -659,28 +716,22 @@ fn load_or_create_manifest(dir: &Path, sync: bool) -> Result<Manifest> {
                     manifest.format
                 )));
             }
-            Ok(manifest)
+            Ok(Some(manifest))
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            let log_dir = dir.join("log");
-            if log_dir.exists() && fs::read_dir(&log_dir)?.next().is_some() {
-                return Err(Error::Format(format!(
-                    "{} has a log but no MANIFEST",
-                    dir.display()
-                )));
-            }
-            let manifest = Manifest {
-                format: STORE_FORMAT,
-                store_id: uuid::Uuid::now_v7().to_string(),
-                created_at: Timestamp::now(),
-            };
-            let bytes =
-                serde_json::to_vec_pretty(&manifest).map_err(|e| Error::Invalid(e.to_string()))?;
-            fsutil::write_atomic(&path, &bytes, sync)?;
-            Ok(manifest)
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+fn create_manifest(dir: &Path, sync: bool) -> Result<Manifest> {
+    let manifest = Manifest {
+        format: STORE_FORMAT,
+        store_id: uuid::Uuid::now_v7().to_string(),
+        created_at: Timestamp::now(),
+    };
+    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| Error::Invalid(e.to_string()))?;
+    fsutil::write_atomic(&dir.join(MANIFEST), &bytes, sync)?;
+    Ok(manifest)
 }
 
 fn check_actor(actor: &Actor) -> Result<()> {

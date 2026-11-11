@@ -24,7 +24,22 @@ pub enum Scope {
     Session(String),
 }
 
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= MAX_NAME_LEN
+        && !name.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
 impl Scope {
+    /// Checks a scope built directly from its variants, which bypasses
+    /// [`FromStr`]. Writes call this so every stored scope parses on replay.
+    pub fn validate(&self) -> Result<(), ScopeParseError> {
+        match self.name() {
+            Some(name) if !valid_name(name) => Err(ScopeParseError(self.to_string())),
+            _ => Ok(()),
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Scope::Global => "global",
@@ -84,10 +99,7 @@ impl FromStr for Scope {
             return Ok(Scope::Global);
         }
         let (kind, name) = s.split_once(':').ok_or_else(err)?;
-        let valid_name = !name.is_empty()
-            && name.chars().count() <= MAX_NAME_LEN
-            && !name.chars().any(|c| c.is_whitespace() || c.is_control());
-        if !valid_name {
+        if !valid_name(name) {
             return Err(err());
         }
         let name = name.to_owned();
@@ -146,6 +158,14 @@ mod tests {
         ] {
             assert!(text.parse::<Scope>().is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn validate_catches_scopes_built_directly() {
+        assert!(Scope::Project("My Projects/app".into()).validate().is_err());
+        assert!(Scope::Team(String::new()).validate().is_err());
+        assert!(Scope::Project("acme/api".into()).validate().is_ok());
+        assert!(Scope::Global.validate().is_ok());
     }
 
     #[test]

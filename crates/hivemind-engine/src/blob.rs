@@ -35,21 +35,25 @@ impl BlobStore {
     }
 
     /// Stores `bytes` and returns its hash, and whether it was newly written.
+    /// On return the blob and both directory levels above it are durable, even
+    /// when the blob already existed: another writer's rename may be visible
+    /// before its directory flush has finished.
     pub fn put(&self, bytes: &[u8]) -> Result<(BlobHash, bool)> {
         let hash = BlobHash::of(bytes);
         let path = self.path(&hash);
-        if path.exists() {
-            return Ok((hash, false));
+        let shard = path.parent().expect("blob paths have a parent");
+        let fresh = !path.exists();
+        if fresh {
+            fs::create_dir_all(shard)?;
+            fsutil::write_atomic(&path, bytes, self.sync)?;
         }
-        let dir = path.parent().expect("blob paths have a parent");
-        if !dir.exists() {
-            fs::create_dir_all(dir)?;
-            if self.sync {
-                fsutil::sync_dir(&self.root)?;
+        if self.sync {
+            if !fresh {
+                fsutil::sync_dir(shard)?;
             }
+            fsutil::sync_dir(&self.root)?;
         }
-        fsutil::write_atomic(&path, bytes, self.sync)?;
-        Ok((hash, true))
+        Ok((hash, fresh))
     }
 
     pub fn get(&self, hash: &BlobHash) -> Result<Vec<u8>> {

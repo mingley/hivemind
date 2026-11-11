@@ -57,7 +57,21 @@ F13 (crash safety) runs from M0 onward and blocks every release.
   - `retract`, `invalidate`, `link`, `feedback`;
   - `put`, `cat`, `log`, `stats`, `verify`.
 
-**Tested:** 58 tests.
+**Hardened after an independent code review** (all 7 findings fixed, each
+with a regression test):
+
+- **Replay safety:** decode-before-append, plus validation of scopes, payload
+  depth, and timestamp ranges.
+- **Belief policy `belief-v1`:**
+  - writer labels never grant human trust;
+  - authorship doesn't lift taint;
+  - derived claims are capped by their inputs;
+  - `supports` edges are credited to whoever adds them.
+- **Applicability:** prerelease toolchains match by their base version.
+- **Recovery:** truncations are recorded in the log.
+- **Durability:** blob and directory fsyncs; the MANIFEST is written last.
+
+**Tested:** 70 tests.
 
 - Torn-tail truncation at every byte, and bit flips at every byte of the last
   record.

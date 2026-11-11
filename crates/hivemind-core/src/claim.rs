@@ -18,6 +18,9 @@ const MAX_KEY_CHARS: usize = 128;
 const MAX_ENTITY_CHARS: usize = 256;
 const MAX_QUOTE_BYTES: usize = 2_048;
 const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+/// Deepest nesting accepted in the payload. Event decoding has a recursion
+/// limit, so anything stored must stay well inside it to replay.
+const MAX_PAYLOAD_DEPTH: usize = 32;
 
 str_enum! {
     pub enum ClaimKind {
@@ -297,6 +300,29 @@ impl ClaimData {
 
     pub fn validate(&self) -> Result<(), ValidationError> {
         let fail = |msg: String| Err(ValidationError(msg));
+        if let Err(e) = self.scope.validate() {
+            return fail(e.to_string());
+        }
+        for (name, time) in [
+            ("valid_from", self.valid_from),
+            ("valid_to", self.valid_to),
+            ("review_by", self.review_by),
+        ] {
+            if let Some(t) = time
+                && !t.is_representable()
+            {
+                return fail(format!("{name} must fall between 1970 and the year 9999"));
+            }
+        }
+        if self
+            .payload
+            .values()
+            .any(|v| json_depth(v) >= MAX_PAYLOAD_DEPTH)
+        {
+            return fail(format!(
+                "payload nests deeper than {MAX_PAYLOAD_DEPTH} levels"
+            ));
+        }
         let statement_chars = self.statement.chars().count();
         if self.statement.trim().is_empty() {
             return fail("statement is empty".into());
@@ -353,6 +379,14 @@ impl ClaimData {
             return fail("valid_to is before valid_from".into());
         }
         Ok(())
+    }
+}
+
+fn json_depth(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(items) => 1 + items.iter().map(json_depth).max().unwrap_or(0),
+        serde_json::Value::Object(map) => 1 + map.values().map(json_depth).max().unwrap_or(0),
+        _ => 0,
     }
 }
 
@@ -429,6 +463,26 @@ mod tests {
         assert!(claim.validate().is_ok());
         claim.applies_when.insert("OS".into(), "macos".into());
         assert!(claim.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_values_that_would_not_replay() {
+        let mut claim = ClaimData::new(
+            ClaimKind::Fact,
+            "x",
+            Scope::Project("My Projects/app".into()),
+        );
+        assert!(claim.validate().is_err(), "scope with whitespace");
+        claim.scope = scope();
+        let mut deep = serde_json::json!("leaf");
+        for _ in 0..40 {
+            deep = serde_json::json!([deep]);
+        }
+        claim.payload.insert("deep".into(), deep);
+        assert!(claim.validate().is_err(), "deep payload");
+        claim.payload.clear();
+        claim.review_by = Some(Timestamp::from_millis(i64::MAX));
+        assert!(claim.validate().is_err(), "unrepresentable time");
     }
 
     #[test]

@@ -330,6 +330,13 @@ fn run(cli: Cli) -> Result<()> {
     };
     let store = Store::open(&dir, options)
         .with_context(|| format!("opening store at {}", dir.display()))?;
+    let recovery = store.recovery();
+    if recovery.truncated_bytes > 0 {
+        eprintln!(
+            "warning: removed {} bytes of a torn, unacknowledged write from the end of the log; recorded as a `recovered` event",
+            recovery.truncated_bytes
+        );
+    }
     let actor = actor(&cli);
     let out = Output { json: cli.json };
 
@@ -487,10 +494,9 @@ fn run(cli: Cli) -> Result<()> {
                 "log        {} segments, {} bytes",
                 stats.log_segments, stats.log_bytes
             );
-            if stats.recovery.truncated_bytes > 0 {
+            for (offset, bytes) in &stats.recoveries {
                 println!(
-                    "recovery   removed a torn write of {} bytes at open",
-                    stats.recovery.truncated_bytes
+                    "recovery   removed a torn write of {bytes} bytes (event at offset {offset})"
                 );
             }
             Ok(())
