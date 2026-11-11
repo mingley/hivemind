@@ -1,9 +1,9 @@
 # 06: Build plan, milestones, and open questions
 
-Status: v0.3 (2026-11-10). M0 is done; M1 is next. Written after the build decision
-([04](04-architecture-and-decisions.md#decision-summary)). Each milestone
-ends with something usable, a test or benchmark that would expose failure, and
-an explicit list of what it does **not** prove.
+Status: v0.4 (2026-11-11). M0 and M1 are done; M2 is next. Written after the
+build decision ([04](04-architecture-and-decisions.md#decision-summary)). Each
+milestone ends with something usable, a test or benchmark that would expose
+failure, and an explicit list of what it does **not** prove.
 
 ## Smallest useful implementation
 
@@ -94,8 +94,9 @@ synthetic claims across 20 scopes, synthetic vocabulary of 207k terms;
 | RSS after replay | 230 MB | ≤ 50 MB ❌ |
 
 **The RSS miss is an F8 finding.** The v0 projections hold every claim's full
-data in memory, and the synthetic vocabulary is large. It is fixed in M1 by
-three changes:
+data in memory, and the synthetic vocabulary is large. The planned fix is
+three changes (still open after M1; see
+[M1 status](#m1-status-daemon-and-mcp-done-2026-11-11)):
 
 - **Compact rows** ("keydir"): filter and rank fields stay in memory, and
   full claims are read from the log by offset on demand.
@@ -114,7 +115,7 @@ change until then):
   a frame-type byte, a masked CRC, a segment epoch, and a header version.
 - Evaluate a `postcard` codec (codec 2) next to readable JSON (codec 1).
 - Group commit across concurrent writers through a single writer thread
-  (M1, with the daemon).
+  (daemon path lands in M1; explicit batching channel still optional).
 - Guard free disk space before `ENOSPC`. Sweep stray temporary blob files at
   open.
 - Crash testing beyond `kill -9`:
@@ -126,15 +127,59 @@ change until then):
 - `forget`: erasure with a physical purge of log payloads, blobs, and
   projections (M3).
 
+## M1 status: daemon and MCP (done 2026-11-11)
+
+**Built** (`crates/hivemind`, engine APIs):
+
+- **`hivemindd`:** single store owner; Unix socket at
+  `<store>/run/hivemindd.sock` (`0700` run dir, `0600` socket); version
+  handshake (`hivemind-socket-v1`); idle exit via `HIVEMIND_IDLE_TIMEOUT`
+  (default 600s, `0` disables).
+- **`hivemind mcp`:** stdio MCP shim via `rmcp`; finds or starts `hivemindd`.
+- **Six MCP tools** (fixed order): `remember`, `recall`, `show`, `retract`,
+  `feedback`, `changes_since`. Server `instructions` and tool text state the
+  evidence-not-instructions rule (current code wins).
+- **Change feed / read-your-writes:** `Store::changes_since` with optional
+  scope / claim / kind filters; `Query.min_offset` and
+  `Store::wait_for_offset` so a reader can wait for a prior write offset.
+- **Actor env:** `HIVEMIND_DIR`, `HIVEMIND_PRINCIPAL`, `HIVEMIND_AGENT`,
+  `HIVEMIND_SESSION` (plus idle timeout on the daemon).
+- **Setup docs:** [setup-mcp.md](setup-mcp.md) for Claude Code, Codex CLI, and
+  Copilot CLI.
+
+**Still open from the M1 brief (honest gaps):**
+
+- **RSS mitigations** called out after M0 (compact claim rows / keydir,
+  interning of scopes and principals, token-type caps) are **not** landed.
+  The 230 MB / 100k-claim M0 measurement still stands; no new RSS number is
+  claimed here.
+- **Sandbox questions** remain unanswered: whether Claude Code, Codex, and
+  Copilot CLI sandboxes allow a Unix socket or a spawned daemon. The setup
+  doc records the workaround of starting `hivemindd` outside the sandbox.
+- **Per-agent identity** is environment-provided only (trust-on-first-use
+  locally); no authenticated credentials yet.
+- **Default event encoding** (JSON v1) was not revisited; postcard remains a
+  follow-up.
+- Remote HTTP/gRPC, OAuth, leases/handoffs beyond claim kind, vectors, and
+  `forget` stay out of scope (as planned).
+
+**What this proves / does not prove:** several agents on one machine can share
+a durable store through the MCP shim and change feed. It does not prove remote
+or team use, that memory improves agent outcomes (M2), or that the laptop RSS
+target is met.
+
+Working notes that guided the implementation are kept as historical in
+[m1-implementation-notes.md](m1-implementation-notes.md).
+
 ## Open questions
 
 | Question | Why it matters | How we'll answer it |
 |---|---|---|
-| Do agent sandboxes (cloud agents, restricted CLIs) allow a Unix socket or a spawned daemon? | Decides the default local transport | Try Claude Code, Codex, and Copilot CLI sandboxes in M1 |
-| How does a stdio shim get a per-agent identity? | Attribution and access control | Environment-provided credentials, per the MCP spec; test in M1 |
+| Do agent sandboxes (cloud agents, restricted CLIs) allow a Unix socket or a spawned daemon? | Decides the default local transport | Still open after M1; try each sandbox with [setup-mcp.md](setup-mcp.md) |
+| How does a stdio shim get a per-agent identity? | Attribution and access control | M1 uses env (`HIVEMIND_PRINCIPAL` / `_AGENT` / `_SESSION`); authenticated credentials remain for later |
 | How should writes happen without burdening agents? (agent-authored tool calls versus hooks at session end) | Write quality and token cost (F6) | M2 harness compares the two |
 | Session-level taint: did the agent read untrusted content before writing? | Laundering untrusted text into trusted memory | Design in M3; attack tests in F12 |
 | Which embedding model, if any, is the default? | Footprint and quality | F4 offline in M2, online in M4 |
 | What erasure SLA, and is crypto-shredding enough legally? | Privacy compliance for shared use | Before M5 |
 | License for the repository | Adoption and contributions | Owner decision before the first release |
-| Default event encoding (JSON v1 now) | Size, speed, and canonical hashing | [research/09](../research/09-engine-design-techniques.md); revisit at M1 |
+| Default event encoding (JSON v1 now) | Size, speed, and canonical hashing | [research/09](../research/09-engine-design-techniques.md); not revisited in M1; still open |

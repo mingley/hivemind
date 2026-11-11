@@ -10,9 +10,12 @@ and tokens**, with enough provenance that agents can verify what they
 retrieve. It runs as a lean local daemon on a laptop and is designed to grow
 into a shared service.
 
-> **Status (2026-11-10):** research done; the engine core (M0) is built and
-> tested. The daemon and MCP server (M1) are next. Nothing here is
-> production-ready yet.
+> **Status (2026-11-11):** research done; M0 engine core and M1 local daemon +
+> MCP shim are built and tested. Several agents on one machine can share a
+> store over stdio MCP (`hivemind mcp` → `hivemindd`). This is **not**
+> production-ready: no remote/auth story, RSS still over the laptop target,
+> and sandbox compatibility is unproven. Setup:
+> [docs/setup-mcp.md](docs/setup-mcp.md).
 
 ## What makes it different
 
@@ -46,6 +49,7 @@ into a shared service.
 | 06 | [Build plan](docs/06-prototype-plan.md) | Milestones, what each proves and doesn't, open questions |
 | 07 | [Falsification experiments](docs/07-falsification-experiments.md) | Prioritized experiments that could overturn design bets early |
 | 08 | [Hippocampal design](docs/08-hippocampal-design.md) | Which ideas from hippocampal research become mechanisms, and how each is tested |
+| — | [MCP setup](docs/setup-mcp.md) | Build `hivemind` / `hivemindd`, configure Claude Code, Codex CLI, and Copilot CLI |
 
 The [`research/`](research/) directory holds the sourced research reports these
 documents build on. Every external claim is labeled **[V]** verified, **[C]**
@@ -57,6 +61,7 @@ the date checked (2026-11-10).
 ```bash
 cargo build --release
 alias hm=./target/release/hivemind   # the store defaults to ~/.hivemind/store; override with --dir
+# ./target/release/hivemindd owns the store; `hm mcp` finds or starts it for agents
 
 hm remember "Linking fails with _SSL_CTX_new not found on macOS arm64; set OPENSSL_DIR to brew openssl@3" \
   --kind solution --scope project:acme/api \
@@ -70,7 +75,9 @@ hm recall _SSL_CTX_new --ctx os=linux   # → no matching memories (the fix does
 ```
 
 Other commands: `retract`, `invalidate`, `link`, `feedback`, `put`, `cat`,
-`log` (the change feed), `stats`, and `verify`. Run `hm --help` for the rest.
+`log` (the change feed), `stats`, `verify`, `mcp`, and `daemon`. Run
+`hm --help` for the rest. Agent wiring:
+[docs/setup-mcp.md](docs/setup-mcp.md).
 
 ## Status and measurements
 
@@ -83,10 +90,11 @@ claims):
 | Recall across all scopes | p95 4.8 ms |
 | Write acknowledged after `F_FULLFSYNC` | p95 8.9 ms |
 | Replay on open | 0.8 s |
-| RSS after replay | 230 MB, over the 50 MB target; fix planned for M1 |
+| RSS after replay | 230 MB, over the 50 MB target; compact-row mitigations still open after M1 |
 
-Details, follow-ups, and the next milestones are in
-[06](docs/06-prototype-plan.md#m0-status-engine-core-done-2026-11-10).
+Details, follow-ups, and milestones are in
+[06](docs/06-prototype-plan.md#m0-status-engine-core-done-2026-11-10) and
+[M1 status](docs/06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11).
 
 Every change runs `cargo fmt --check`, `cargo clippy --all-targets -- -D
 warnings`, and `cargo test`. The test suite includes a `kill -9` crash loop
@@ -95,10 +103,10 @@ that checks every acknowledged write survives.
 ## Layout
 
 ```text
-docs/        design documents (start with 01, then 04)
+docs/        design documents (start with 01, then 04); setup-mcp.md for agents
 research/    sourced research reports, one per thread
 crates/
   hivemind-core/     memory model types: claims, events, scopes, applicability, belief, hygiene
   hivemind-engine/   storage engine: log, blobs, projections, BM25, recall
-  hivemind/          the `hivemind` CLI (the daemon and MCP server come in M1)
+  hivemind/          `hivemind` CLI, `hivemindd` daemon, and `hivemind mcp` stdio shim
 ```
