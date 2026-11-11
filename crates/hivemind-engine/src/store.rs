@@ -666,15 +666,30 @@ impl Store {
     /// The full (L1) view of a claim. With a context, applicability is evaluated too.
     /// Reloads the claim body from the log by the keydir offset.
     pub fn get(&self, id: &ClaimId, context: Option<&Context>) -> Option<ClaimDetail> {
+        self.get_with_workspace(id, context, None)
+    }
+
+    /// Like [`get`], and when `workspace` is set, verifies code citations on disk.
+    pub fn get_with_workspace(
+        &self,
+        id: &ClaimId,
+        context: Option<&Context>,
+        workspace: Option<&std::path::Path>,
+    ) -> Option<ClaimDetail> {
         let (offset, _) = {
             let state = self.state.read();
             let row = state.row(id)?;
             (row.offset, row.id)
         };
         let data = self.load_claim_data(offset).ok()?;
+        let checks = workspace
+            .map(|root| hivemind_core::verify_citations(root, &data.provenance.citations))
+            .unwrap_or_default();
         let state = self.state.read();
         let row = state.row(id)?;
-        Some(recall::detail(&state, row, &data, context))
+        Some(recall::detail_with_citations(
+            &state, row, &data, context, checks,
+        ))
     }
 
     /// Resolves a full claim ID or a unique prefix of at least 4 hex digits.

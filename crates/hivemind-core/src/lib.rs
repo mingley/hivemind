@@ -60,8 +60,10 @@ macro_rules! str_enum {
 
 pub mod applicability;
 pub mod belief;
+pub mod citation;
 pub mod claim;
 pub mod event;
+pub mod fingerprint;
 pub mod hygiene;
 pub mod ids;
 pub mod scope;
@@ -69,11 +71,19 @@ pub mod time;
 
 pub use applicability::{Applicability, Context};
 pub use belief::{BELIEF_POLICY, Status, TrustTier, Verification};
+pub use citation::{
+    CONTENT_HASH_PREFIX, CitationCheck, CitationStatus, hash_cited_text, hash_file_citation,
+    verify_citation, verify_citations,
+};
 pub use claim::{
     Citation, ClaimData, ClaimKind, EvidenceRef, Method, Origin, Provenance, ValidationError,
 };
 pub use event::{
     Actor, ActorKind, EVENT_VERSION, EdgeKind, Event, EventBody, Outcome, RetractReason,
+};
+pub use fingerprint::{
+    fingerprint_here, fingerprint_lockfiles, merge_lockfile_fingerprint, parse_cargo_lock,
+    parse_npm_lock, parse_pipfile_lock, parse_poetry_lock,
 };
 pub use ids::{BlobHash, ClaimId, EventId, IdParseError};
 pub use scope::{Scope, ScopeParseError};

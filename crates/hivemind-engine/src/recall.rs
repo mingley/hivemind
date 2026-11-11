@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 
 use hivemind_core::applicability::{self, Applicability, Context};
 use hivemind_core::{
-    Actor, ClaimData, ClaimId, ClaimKind, EventId, Provenance, Scope, Status, Timestamp, TrustTier,
-    Verification,
+    Actor, CitationCheck, ClaimData, ClaimId, ClaimKind, EventId, Provenance, Scope, Status,
+    Timestamp, TrustTier, Verification,
 };
 use serde::Serialize;
 
@@ -64,6 +64,10 @@ pub enum Flag {
     ApplicabilityUnknown,
     /// The statement was shortened; expand for the full text.
     Truncated,
+    /// At least one code citation no longer matches the workspace.
+    CitationDrifted,
+    /// At least one code citation is missing or unreadable.
+    CitationBroken,
 }
 
 /// The L0 view of a claim: enough to decide whether to expand it.
@@ -144,6 +148,9 @@ pub struct ClaimDetail {
     pub last_validated_at: Option<Timestamp>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<EdgeView>,
+    /// Read-time citation checks when a workspace root was provided.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citation_checks: Vec<CitationCheck>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -348,11 +355,12 @@ fn card_with_prior(
     }
 }
 
-pub(crate) fn detail(
+pub(crate) fn detail_with_citations(
     state: &State,
     row: &ClaimRow,
     data: &ClaimData,
     context: Option<&Context>,
+    citation_checks: Vec<CitationCheck>,
 ) -> ClaimDetail {
     let edges = state
         .edges_of(&row.id)
@@ -405,6 +413,7 @@ pub(crate) fn detail(
         feedback: row.feedback.clone(),
         last_validated_at: row.last_validated_at,
         edges,
+        citation_checks,
     }
 }
 
@@ -490,6 +499,8 @@ pub fn render_card(card: &Card) -> String {
             Flag::Inapplicable => "inapplicable here",
             Flag::ApplicabilityUnknown => "applicability unknown",
             Flag::Truncated => "truncated",
+            Flag::CitationDrifted => "citation drifted",
+            Flag::CitationBroken => "citation broken",
             Flag::Disputed | Flag::Historical => unreachable!(),
         })
         .collect();

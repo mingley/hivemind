@@ -149,6 +149,9 @@ struct RememberArgs {
     /// Retry key: repeating it returns the original result instead of writing again.
     #[arg(long)]
     idempotency_key: Option<String>,
+    /// Hash `--cite` paths under this workspace (fills content_hash for drift checks).
+    #[arg(long, value_name = "DIR")]
+    workspace: Option<PathBuf>,
 }
 
 #[derive(Args, Debug, Default)]
@@ -169,9 +172,12 @@ struct ContextArgs {
     /// Context for applicability, such as os=linux or dep:cargo/tokio=1.47.1 (repeatable).
     #[arg(long = "ctx", value_name = "KEY=VALUE", value_parser = parse_pair)]
     ctx: Vec<(String, String)>,
-    /// Add this machine's os and arch to the context.
+    /// Add this machine's os/arch and dependency versions from lockfiles.
     #[arg(long)]
     here: bool,
+    /// Workspace root for lockfile fingerprinting and citation checks [default: cwd].
+    #[arg(long, value_name = "DIR")]
+    workspace: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -405,8 +411,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::Show(args) => {
             let id = store.resolve(&args.id)?;
             let ctx = context(&args.context);
+            let workspace = workspace_root(&args.context);
             let detail = store
-                .get(&id, (!ctx.is_empty()).then_some(&ctx))
+                .get_with_workspace(&id, (!ctx.is_empty()).then_some(&ctx), workspace.as_deref())
                 .ok_or_else(|| anyhow!("claim {id} not found"))?;
             if out.json {
                 out.print_json(&detail)
@@ -765,6 +772,16 @@ fn actor(cli: &Cli) -> Actor {
     }
 }
 
+fn workspace_root(args: &ContextArgs) -> Option<PathBuf> {
+    if let Some(dir) = &args.workspace {
+        return Some(dir.clone());
+    }
+    if args.here {
+        return std::env::current_dir().ok();
+    }
+    None
+}
+
 fn context(args: &ContextArgs) -> Context {
     let mut ctx: Context = args.ctx.iter().cloned().collect();
     if args.here {
@@ -772,6 +789,9 @@ fn context(args: &ContextArgs) -> Context {
             .or_insert_with(|| std::env::consts::OS.to_owned());
         ctx.entry("arch".into())
             .or_insert_with(|| std::env::consts::ARCH.to_owned());
+    }
+    if let Some(root) = workspace_root(args) {
+        hivemind_core::merge_lockfile_fingerprint(&root, &mut ctx);
     }
     ctx
 }
@@ -812,6 +832,22 @@ fn remember(store: &Store, actor: &Actor, args: RememberArgs, out: &Output) -> R
         .as_deref()
         .map(|t| Timestamp::parse_relative(t, now))
         .transpose()?;
+    let mut citations = args.cites;
+    if let Some(root) = args
+        .workspace
+        .as_ref()
+        .cloned()
+        .or_else(|| std::env::var_os("HIVEMIND_WORKSPACE").map(PathBuf::from))
+    {
+        for citation in &mut citations {
+            if citation.content_hash.is_none() {
+                citation.content_hash = Some(
+                    hivemind_core::hash_file_citation(&root, citation)
+                        .map_err(|e| anyhow!("hashing citation {citation}: {e}"))?,
+                );
+            }
+        }
+    }
     data.provenance = Provenance {
         method: args.method.unwrap_or(if actor.kind == ActorKind::Human {
             Method::Human
@@ -820,7 +856,7 @@ fn remember(store: &Store, actor: &Actor, args: RememberArgs, out: &Output) -> R
         }),
         origin: args.origin,
         evidence: collect_evidence(store, actor, &args.evidence)?,
-        citations: args.cites,
+        citations,
         derived_from: resolve_all(store, &args.derived_from)?,
     };
     let request = Remember {
@@ -929,6 +965,18 @@ fn print_detail(store: &Store, detail: &ClaimDetail, with_evidence: bool) -> Res
     }
     for citation in &detail.provenance.citations {
         println!("cites        {citation}");
+    }
+    for check in &detail.citation_checks {
+        let detail = check.detail.as_deref().unwrap_or("");
+        if detail.is_empty() {
+            println!("cite check   {} {}", check.citation, check.status.as_str());
+        } else {
+            println!(
+                "cite check   {} {} ({detail})",
+                check.citation,
+                check.status.as_str()
+            );
+        }
     }
     for evidence in &detail.provenance.evidence {
         match evidence {

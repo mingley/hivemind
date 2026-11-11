@@ -378,6 +378,19 @@ impl ClaimData {
         {
             return fail("valid_to is before valid_from".into());
         }
+        if self.kind == ClaimKind::Handoff {
+            for key in ["goal", "done", "remaining", "next_step"] {
+                match self.payload.get(key) {
+                    Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {}
+                    Some(serde_json::Value::Array(items)) if !items.is_empty() => {}
+                    _ => {
+                        return fail(format!(
+                            "handoff claims require non-empty payload fields goal, done, remaining, and next_step (missing or empty: {key})"
+                        ));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -451,6 +464,25 @@ mod tests {
         assert_eq!(bare.start_line, None);
         assert!("src/a.rs:9-3".parse::<Citation>().is_err());
         assert!(":3".parse::<Citation>().is_err());
+    }
+
+    #[test]
+    fn handoffs_require_structured_payload() {
+        let mut claim = ClaimData::new(ClaimKind::Handoff, "pick up limiter work", scope());
+        assert!(claim.validate().is_err());
+        claim
+            .payload
+            .insert("goal".into(), serde_json::json!("finish limiter"));
+        claim
+            .payload
+            .insert("done".into(), serde_json::json!(["skeleton"]));
+        claim
+            .payload
+            .insert("remaining".into(), serde_json::json!(["tests"]));
+        claim
+            .payload
+            .insert("next_step".into(), serde_json::json!("write failing test"));
+        assert!(claim.validate().is_ok());
     }
 
     #[test]
