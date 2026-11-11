@@ -1,6 +1,6 @@
 # 06: Build plan, milestones, and open questions
 
-Status: v0.8 (2026-11-11). M0–M5 are done; M6 is next. Written after the
+Status: v0.9 (2026-11-11). M0–M6 are done. Written after the
 build decision ([04](04-architecture-and-decisions.md#decision-summary)). Each
 milestone ends with something usable, a test or benchmark that would expose
 failure, and an explicit list of what it does **not** prove.
@@ -265,6 +265,30 @@ model weights file (plug any `Embedder` in), ANN, or F4 online quality wins.
 Streamable HTTP, OAuth 2.1 wire shape, gRPC, sync queue/cursor, and segment
 shipping exist and are tested. It does **not** prove team-sharing outcome
 gains (F11), poisoning defenses under attack (F12), or high availability.
+
+## M6 status: engine growth (done 2026-11-11)
+
+**Built:**
+
+- **Snapshots:** `Store::checkpoint` writes `snapshots/<offset>.hsnap`
+  (BLAKE3-sealed event prefix). Open applies the pack then
+  `Log::open_from` skips re-applying those offsets while still validating the
+  full log (`crates/hivemind-engine/src/snapshot.rs`).
+- **Mmap immutable lexical segments:** `LexicalSegment` seals BM25
+  postings to `HMLXSEG\x01` files and searches via `memmap2`
+  (`indexseg.rs`); `Store::seal_lexical` writes
+  `indexes/lexical-<offset>.seg`.
+- **ANN for large scopes:** random-hyperplane LSH (`VectorAnn`) with exact
+  cosine rescoring; `Store::build_ann` / `VectorIndex::search_ann`; recall
+  prefers ANN when built.
+- **Deterministic simulation:** seeded LCG crash/reopen suite
+  (`tests/m6_sim.rs`) checks acknowledged offsets survive and a segment
+  backup+reopen matches claim counts.
+
+**What this proves / does not prove:** the F8 growth levers (checkpoints,
+mmap segments, ANN, sim harness) exist and are tested. It does **not** prove
+1M-scale replay/RSS budgets are met, nor that LSH recall quality matches a
+production ANN library under all distributions.
 
 ## Open questions
 
