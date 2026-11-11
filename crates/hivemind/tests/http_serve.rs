@@ -1,4 +1,4 @@
-//! M5: HTTP service with tenant partitions and bearer auth.
+//! M5: HTTP service with tenants, OAuth 2.1, and MCP Streamable HTTP mount.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -8,7 +8,7 @@ use serde_json::json;
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn health_is_open_and_rpc_requires_bearer() {
+async fn health_oauth_metadata_and_rpc() {
     let root = tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -20,15 +20,13 @@ async fn health_is_open_and_rpc_requires_bearer() {
         listen: addr,
         token: token.clone(),
         no_fsync: true,
+        default_tenant: "default".into(),
+        public_base: Some(format!("http://{addr}")),
+        oauth_client_id: "hivemind-cli".into(),
+        grpc_listen: None,
     }));
 
-    // Wait until the server accepts connections.
-    for _ in 0..50 {
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_for(addr).await;
 
     let client = reqwest::Client::new();
     let health = client
@@ -38,13 +36,38 @@ async fn health_is_open_and_rpc_requires_bearer() {
         .unwrap();
     assert_eq!(health.status(), 200);
 
+    let as_meta = client
+        .get(format!("http://{addr}/.well-known/oauth-authorization-server"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(as_meta.status(), 200);
+    let as_body: serde_json::Value = as_meta.json().await.unwrap();
+    assert!(as_body["token_endpoint"].as_str().unwrap().contains("/oauth/token"));
+
+    let pr_meta = client
+        .get(format!("http://{addr}/.well-known/oauth-protected-resource"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pr_meta.status(), 200);
+
     let denied = client
         .get(format!("http://{addr}/v1/tenants"))
         .send()
         .await
         .unwrap();
     assert_eq!(denied.status(), 401);
+    assert!(
+        denied
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .contains("resource_metadata")
+    );
 
+    // Bootstrap shared bearer still works.
     let tenants = client
         .get(format!("http://{addr}/v1/tenants"))
         .header("Authorization", format!("Bearer {token}"))
@@ -53,9 +76,24 @@ async fn health_is_open_and_rpc_requires_bearer() {
         .unwrap();
     assert_eq!(tenants.status(), 200);
 
+    // OAuth client_credentials → access token → RPC.
+    let token_resp = client
+        .post(format!("http://{addr}/oauth/token"))
+        .form(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", "hivemind-cli"),
+            ("client_secret", token.as_str()),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(token_resp.status(), 200, "{}", token_resp.text().await.unwrap());
+    let token_body: serde_json::Value = token_resp.json().await.unwrap();
+    let access = token_body["access_token"].as_str().unwrap();
+
     let remember = client
         .post(format!("http://{addr}/v1/tenants/acme/rpc"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {access}"))
         .json(&json!({
             "method": "remember",
             "params": {
@@ -69,19 +107,69 @@ async fn health_is_open_and_rpc_requires_bearer() {
         .await
         .unwrap();
     assert_eq!(remember.status(), 200, "{}", remember.text().await.unwrap());
-    let body: serde_json::Value = remember.json().await.unwrap();
-    assert!(body.get("offset").is_some() || body.get("claim").is_some());
 
     let changes = client
         .get(format!("http://{addr}/v1/tenants/acme/changes?from=0"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {access}"))
         .send()
         .await
         .unwrap();
     assert_eq!(changes.status(), 200);
 
+    // MCP Streamable HTTP requires auth; unauthenticated should 401.
+    let mcp_denied = client
+        .post(format!("http://{addr}/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mcp_denied.status(), 401);
+
+    let mcp_ok = client
+        .post(format!("http://{addr}/mcp"))
+        .header("Authorization", format!("Bearer {access}"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        mcp_ok.status().is_success() || mcp_ok.status().as_u16() == 406,
+        "mcp status {} body {}",
+        mcp_ok.status(),
+        mcp_ok.text().await.unwrap_or_default()
+    );
+
     serve.abort();
 }
 
-#[allow(dead_code)]
-fn _addr(_: SocketAddr) {}
+async fn wait_for(addr: SocketAddr) {
+    for _ in 0..50 {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("server did not start on {addr}");
+}

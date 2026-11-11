@@ -20,18 +20,28 @@ path = "src/bin/hivemindd.rs"
 [dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.8", features = ["http1", "json", "tokio"] }
+base64 = "0.22.1"
+blake3 = "1.8.7"
 clap = { version = "4.6.7", features = ["derive", "env"] }
+getrandom = "0.3.4"
 hivemind-core = { version = "0.1.0", path = "../hivemind-core" }
 hivemind-engine = { version = "0.1.0", path = "../hivemind-engine" }
-# Official MCP Rust SDK; transport-io = stdio, macros for tool handlers.
-rmcp = { version = "3.9.0", features = ["server", "transport-io"] }
+prost = "0.14.5"
+# Official MCP Rust SDK; transport-io = stdio, streamable-http-server = MCP over HTTP.
+rmcp = { version = "3.9.0", features = ["server", "transport-io", "transport-streamable-http-server"] }
 schemars = "1.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.10.9"
 thiserror = "2.0.21"
 tokio = { version = "1.49.0", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tonic = "0.14.9"
+tonic-prost = "0.14.9"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14.9"
 
 [lints]
 workspace = true
@@ -40,3 +50,4 @@ workspace = true
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 tempfile = "3.27.0"
 tokio = { version = "1.49.0", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tonic = "0.14.9"

@@ -102,7 +102,7 @@ enum Command {
     },
     /// Run the store daemon in the foreground (same as `hivemindd`).
     Daemon(hivemind::daemon::DaemonArgs),
-    /// Run the shared HTTP service (tenant partitions + bearer auth).
+    /// Run the shared HTTP/MCP/gRPC service (tenants + OAuth 2.1).
     Serve(ServeArgs),
     /// Copy durable log segments to a backup directory.
     Backup(BackupArgs),
@@ -119,12 +119,27 @@ struct ServeArgs {
     /// Root directory holding `tenants/<id>/` partitions [default: ~/.hivemind].
     #[arg(long, env = "HIVEMIND_ROOT")]
     root: Option<PathBuf>,
-    /// Listen address.
+    /// HTTP listen address (also serves MCP Streamable HTTP at `/mcp`).
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: String,
-    /// Bearer token required on every request except `/health`.
+    /// Bootstrap bearer token and OAuth client secret / signing key.
     #[arg(long, env = "HIVEMIND_TOKEN")]
     token: String,
+    /// Tenant partition backing `/mcp`.
+    #[arg(long, default_value = "default", env = "HIVEMIND_DEFAULT_TENANT")]
+    default_tenant: String,
+    /// Public base URL for OAuth metadata [default: http://{listen}].
+    #[arg(long, env = "HIVEMIND_PUBLIC_BASE")]
+    public_base: Option<String>,
+    /// OAuth 2.1 client_id for the pre-registered confidential client.
+    #[arg(long, default_value = "hivemind-cli", env = "HIVEMIND_OAUTH_CLIENT_ID")]
+    oauth_client_id: String,
+    /// gRPC listen address [default: same host as --listen, port 8788].
+    #[arg(long, env = "HIVEMIND_GRPC_LISTEN")]
+    grpc_listen: Option<String>,
+    /// Disable the gRPC listener.
+    #[arg(long, default_value_t = false)]
+    no_grpc: bool,
     /// Skip fsync (tests only).
     #[arg(long, hide = true)]
     no_fsync: bool,
@@ -460,12 +475,26 @@ fn run(cli: Cli) -> Result<()> {
                 .listen
                 .parse()
                 .with_context(|| format!("invalid --listen {}", args.listen))?;
+            let grpc_listen = if args.no_grpc {
+                None
+            } else if let Some(raw) = &args.grpc_listen {
+                Some(
+                    raw.parse()
+                        .with_context(|| format!("invalid --grpc-listen {raw}"))?,
+                )
+            } else {
+                Some(std::net::SocketAddr::new(listen.ip(), 8788))
+            };
             let rt = tokio::runtime::Runtime::new()?;
             return rt.block_on(hivemind::http::serve(hivemind::http::ServeArgs {
                 root,
                 listen,
                 token: args.token.clone(),
                 no_fsync: args.no_fsync || cli.no_fsync,
+                default_tenant: args.default_tenant.clone(),
+                public_base: args.public_base.clone(),
+                oauth_client_id: args.oauth_client_id.clone(),
+                grpc_listen,
             }));
         }
         Command::Backup(args) => {

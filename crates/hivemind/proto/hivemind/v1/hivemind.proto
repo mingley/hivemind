@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package hivemind.v1;
+
+// Minimal shared-service gRPC surface (M5). Complex claim shapes ride as JSON
+// through Rpc so we do not duplicate the daemon protocol in protobuf yet.
+
+service Hivemind {
+  rpc Hello(HelloRequest) returns (HelloResponse);
+  rpc Rpc(RpcRequest) returns (RpcResponse);
+  rpc ChangesSince(ChangesSinceRequest) returns (ChangesSinceResponse);
+}
+
+message HelloRequest {
+  string tenant = 1;
+}
+
+message HelloResponse {
+  string json = 1;
+}
+
+message RpcRequest {
+  string tenant = 1;
+  string method = 2;
+  string params_json = 3;
+}
+
+message RpcResponse {
+  string json = 1;
+}
+
+message ChangesSinceRequest {
+  string tenant = 1;
+  uint64 from = 2;
+  uint32 limit = 3;
+}
+
+message ChangesSinceResponse {
+  string json = 1;
+}
