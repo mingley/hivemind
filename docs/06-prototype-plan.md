@@ -1,6 +1,6 @@
 # 06: Build plan, milestones, and open questions
 
-Status: v0.7 (2026-11-11). M0–M4 are done; M5 is next. Written after the
+Status: v0.8 (2026-11-11). M0–M5 are done; M6 is next. Written after the
 build decision ([04](04-architecture-and-decisions.md#decision-summary)). Each
 milestone ends with something usable, a test or benchmark that would expose
 failure, and an explicit list of what it does **not** prove.
@@ -233,6 +233,38 @@ against baselines, nor shared-service security (M5).
 **What this proves / does not prove:** hybrid retrieval plumbing and the cheap
 deterministic hippocampal knobs. It does not ship a production embedding
 model weights file (plug any `Embedder` in), ANN, or F4 online quality wins.
+
+## M5 status: shared service (done 2026-11-11)
+
+**Built:**
+
+- **Tenant partitions:** `tenants/<id>/` under `HIVEMIND_ROOT`;
+  `hivemind serve` opens one store per tenant (`crates/hivemind/src/tenant.rs`).
+- **JSON HTTP API:** `/health`, `/v1/tenants`, `/v1/tenants/{t}/hello|rpc|changes|backup`
+  (`crates/hivemind/src/http.rs`).
+- **MCP Streamable HTTP:** `rmcp` `StreamableHttpService` mounted at `/mcp`
+  for `--default-tenant` (in-process `HiveMcp::from_service`, not only the
+  custom axum JSON RPC). Stdio MCP (`hivemind mcp`) remains for local agents.
+- **OAuth 2.1:** authorization-server + protected-resource metadata
+  (`/.well-known/oauth-*`); `/oauth/authorize` (auth code + PKCE S256);
+  `/oauth/token` (`authorization_code`, `client_credentials`); sealed HMAC
+  access tokens; `WWW-Authenticate` with `resource_metadata` on 401. The
+  shared `--token` / `HIVEMIND_TOKEN` remains a bootstrap/admin bearer and the
+  pre-registered client secret. **Scoped deferral:** no external IdP
+  federation, no dynamic client registration, no refresh tokens — enough for
+  laptop/team agents talking to this AS, not a full identity platform.
+- **gRPC:** tonic `hivemind.v1.Hivemind` (`Hello`, `Rpc`, `ChangesSince`) on
+  `--grpc-listen` (default port 8788); same bearer/OAuth validation.
+- **Laptop sync helpers:** append-only upload queue + pull cursor JSON under
+  `store/sync/` (`crates/hivemind/src/sync.rs`); change feed pull via
+  `/v1/tenants/{t}/changes?from=`.
+- **Segment backup:** `Store::backup_segments` copies `*.hlog` + `MANIFEST`;
+  CLI `hivemind backup` and HTTP `POST …/backup`.
+
+**What this proves / does not prove:** multi-tenant remote access with MCP
+Streamable HTTP, OAuth 2.1 wire shape, gRPC, sync queue/cursor, and segment
+shipping exist and are tested. It does **not** prove team-sharing outcome
+gains (F11), poisoning defenses under attack (F12), or high availability.
 
 ## Open questions
 
