@@ -28,7 +28,7 @@ knowledge and handoffs, which is the cheapest real test of the idea.
 | **M3 Coding-agent semantics** | Citations with read-time verification (`valid`, `drifted`, `broken`). Applicability from a context fingerprint, including lockfile parsing for Cargo, npm, and pip. Leases with fencing; handoffs. Reinforcement on validated use and expiry. Copilot JSONL and markdown import and export | Staleness and conflict handling beat baselines (F5); progressive disclosure (F7) | Shared-service security |
 | **M4 Retrieval depth** | Embedding spaces (pure-Rust inference), exact quantized vector scan, fusion. Hippocampus-inspired mechanisms chosen in [08](08-hippocampal-design.md) | Hybrid search earns its footprint (F4 online); graph-style recall for multi-hop (F10) | Scale beyond one node |
 | **M5 Shared service** | MCP Streamable HTTP and gRPC with OAuth 2.1. One partition per tenant. Laptop upload queue and cursor pull. Backup by shipping segments | Team sharing value and harm (F11); poisoning defenses (F12) | High availability |
-| **M6 Engine growth** (triggered) | Snapshots; memory-mapped immutable index segments; ANN for large scopes; deterministic simulation testing | The v0 limits found by F8 are lifted | — |
+| **M6 Engine growth** | Snapshots; memory-mapped immutable index segments; ANN for large scopes; deterministic simulation testing | The v0 limits found by F8 are lifted | — |
 
 F13 (crash safety) runs from M0 onward and blocks every release.
 
