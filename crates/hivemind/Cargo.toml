@@ -5,16 +5,36 @@ edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+[lib]
+name = "hivemind"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hivemind"
+path = "src/main.rs"
+
+[[bin]]
+name = "hivemindd"
+path = "src/bin/hivemindd.rs"
+
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 hivemind-core = { version = "0.1.0", path = "../hivemind-core" }
 hivemind-engine = { version = "0.1.0", path = "../hivemind-engine" }
-serde = "1.0.229"
+# Official MCP Rust SDK; transport-io = stdio, macros for tool handlers.
+rmcp = { version = "3.9.0", features = ["server", "transport-io"] }
+schemars = "1.2.0"
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.49.0", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tokio = { version = "1.49.0", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }

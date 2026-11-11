@@ -42,6 +42,10 @@ pub struct Query {
     pub budget_tokens: Option<usize>,
     /// Evaluation time for recency and expiry. Defaults to now.
     pub now: Option<Timestamp>,
+    /// When set, the store waits until projections reach this offset before
+    /// searching (read-your-writes). The recall path itself does not wait;
+    /// callers use [`crate::Store::wait_for_offset`].
+    pub min_offset: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

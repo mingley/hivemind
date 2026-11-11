@@ -11,12 +11,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use hivemind_core::applicability::{self, Context};
 use hivemind_core::hygiene;
 use hivemind_core::{
-    Actor, ActorKind, BlobHash, ClaimData, ClaimId, EVENT_VERSION, EdgeKind, Event, EventBody,
-    EventId, EvidenceRef, Origin, Outcome, RetractReason, Status, Timestamp,
+    Actor, ActorKind, BlobHash, ClaimData, ClaimId, ClaimKind, EVENT_VERSION, EdgeKind, Event,
+    EventBody, EventId, EvidenceRef, Origin, Outcome, RetractReason, Scope, Status, Timestamp,
 };
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -124,6 +125,49 @@ pub struct VerifyReport {
     pub log_segments: usize,
     pub blobs: usize,
     pub problems: Vec<String>,
+}
+
+/// Filters for [`Store::changes_since`]. Empty fields match everything.
+#[derive(Clone, Debug, Default)]
+pub struct ChangesFilter {
+    pub scopes: Option<Vec<Scope>>,
+    pub claims: Option<Vec<ClaimId>>,
+    pub kinds: Option<Vec<ClaimKind>>,
+}
+
+impl ChangesFilter {
+    fn matches(&self, store: &Store, event: &Event) -> bool {
+        if self.scopes.is_none() && self.claims.is_none() && self.kinds.is_none() {
+            return true;
+        }
+        let claim_id = event.body.claim();
+        let row = claim_id.and_then(|id| store.state.read().row(&id).cloned());
+        if let Some(scopes) = &self.scopes {
+            let Some(row) = &row else {
+                return false;
+            };
+            if !scopes.iter().any(|s| s == &row.data.scope) {
+                return false;
+            }
+        }
+        if let Some(claims) = &self.claims {
+            let Some(id) = claim_id else {
+                return false;
+            };
+            if !claims.contains(&id) {
+                return false;
+            }
+        }
+        if let Some(kinds) = &self.kinds {
+            let Some(row) = &row else {
+                return false;
+            };
+            if !kinds.iter().any(|k| k == &row.data.kind) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 impl VerifyReport {
@@ -630,11 +674,62 @@ impl Store {
     /// Events from offset `from`, in order: the change feed. Pass the offset
     /// after the last event you saw as the next cursor.
     pub fn events(&self, from: u64, limit: usize) -> Result<Vec<(u64, Event)>> {
+        self.changes_since(from, limit, &ChangesFilter::default())
+    }
+
+    /// Change feed with optional scope / claim / kind filters.
+    pub fn changes_since(
+        &self,
+        from: u64,
+        limit: usize,
+        filter: &ChangesFilter,
+    ) -> Result<Vec<(u64, Event)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let view = self.log.lock().view();
-        view.read(from, limit)?
-            .into_iter()
-            .map(|(offset, bytes)| codec::decode(offset, &bytes).map(|e| (offset, e)))
-            .collect()
+        let mut out = Vec::new();
+        let mut cursor = from;
+        // Scan ahead of `limit` so filtered feeds still make progress.
+        let batch = limit.saturating_mul(4).max(limit);
+        loop {
+            let batch_rows = view.read(cursor, batch)?;
+            if batch_rows.is_empty() {
+                break;
+            }
+            for (offset, bytes) in batch_rows {
+                cursor = offset + 1;
+                let event = codec::decode(offset, &bytes)?;
+                if filter.matches(self, &event) {
+                    out.push((offset, event));
+                    if out.len() >= limit {
+                        return Ok(out);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Blocks until projections have applied through `min_offset`, or until
+    /// `timeout` elapses. Used for read-your-writes after a write receipt.
+    pub fn wait_for_offset(&self, min_offset: u64, timeout: Duration) -> Result<()> {
+        if self.next_offset() > min_offset {
+            return Ok(());
+        }
+        // `next_offset` is the next write's offset, so reaching `min_offset`
+        // means next_offset > min_offset (the event at min_offset is applied).
+        let deadline = Instant::now() + timeout;
+        while self.next_offset() <= min_offset {
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout(format!(
+                    "projections at {} have not reached offset {min_offset}",
+                    self.next_offset().saturating_sub(1)
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
     }
 
     pub fn stats(&self) -> Stats {

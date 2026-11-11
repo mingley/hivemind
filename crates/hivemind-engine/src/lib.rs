@@ -27,4 +27,4 @@ pub use error::{Error, Result};
 pub use log::{Durability, Recovery};
 pub use recall::{Card, ClaimDetail, Flag, Query, Recall, render_card};
 pub use state::{ArtifactRow, Belief};
-pub use store::{Manifest, Options, Receipt, Remember, Stats, Store, VerifyReport};
+pub use store::{ChangesFilter, Manifest, Options, Receipt, Remember, Stats, Store, VerifyReport};

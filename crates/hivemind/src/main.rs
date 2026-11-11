@@ -1,8 +1,7 @@
 //! `hivemind`: command-line access to a hivemind store.
 //!
-//! In v0 the CLI opens the store directly, and the store's lock admits one
-//! owner at a time. The daemon (`hivemindd`) and the MCP shim come next
-//! (`docs/06-prototype-plan.md`).
+//! Prefers a running `hivemindd` when present; otherwise opens the store
+//! directly. `hivemind mcp` is the stdio MCP shim (M1).
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -90,6 +89,14 @@ enum Command {
     Stats,
     /// Re-read the log and every blob, checking checksums and references.
     Verify,
+    /// Run the MCP stdio shim (finds or starts hivemindd).
+    Mcp {
+        /// Path to hivemindd [default: sibling of this binary, or PATH].
+        #[arg(long)]
+        daemon: Option<PathBuf>,
+    },
+    /// Run the store daemon in the foreground (same as `hivemindd`).
+    Daemon(hivemind::daemon::DaemonArgs),
     /// Append claims in a loop, printing each acknowledged offset (crash testing).
     #[command(hide = true)]
     DebugWriteLoop {
@@ -320,6 +327,24 @@ fn run(cli: Cli) -> Result<()> {
         Some(dir) => dir.clone(),
         None => default_dir()?,
     };
+
+    match &cli.command {
+        Command::Mcp { daemon } => {
+            return hivemind::mcp::main_sync(dir, daemon.clone());
+        }
+        Command::Daemon(args) => {
+            let mut args = args.clone();
+            if args.dir.is_none() {
+                args.dir = Some(dir);
+            }
+            if cli.no_fsync {
+                args.no_fsync = true;
+            }
+            return hivemind::daemon::run(args);
+        }
+        _ => {}
+    }
+
     let options = Options {
         durability: if cli.no_fsync {
             Durability::NoFsync
@@ -359,6 +384,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Recall(args) => {
             let query = Query {
                 text: args.query.join(" "),
+                min_offset: None,
                 scopes: args.scopes,
                 kinds: args.kinds,
                 about: args.about,
@@ -524,6 +550,7 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::DebugWriteLoop { count } => debug_write_loop(&store, &actor, count),
+        Command::Mcp { .. } | Command::Daemon(_) => unreachable!("handled before opening store"),
     }
 }
 

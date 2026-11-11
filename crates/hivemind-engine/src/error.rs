@@ -29,6 +29,8 @@ pub enum Error {
     RecordTooLarge(usize),
     #[error("the log failed a write and rejects writes until the store is reopened")]
     Poisoned,
+    #[error("timed out: {0}")]
+    Timeout(String),
 }
 
 impl Error {
