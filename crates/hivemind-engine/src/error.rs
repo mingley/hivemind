@@ -27,6 +27,10 @@ pub enum Error {
     Secret(&'static str),
     #[error("record of {0} bytes exceeds the log record limit; store large content as an artifact")]
     RecordTooLarge(usize),
+    #[error(
+        "not enough free disk space: need {needed} bytes (including safety margin), only {available} available"
+    )]
+    DiskFull { available: u64, needed: u64 },
     #[error("the log failed a write and rejects writes until the store is reopened")]
     Poisoned,
     #[error("timed out: {0}")]

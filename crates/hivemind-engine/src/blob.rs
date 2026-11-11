@@ -1,11 +1,13 @@
 //! Content-addressed blob store for artifacts (logs, diffs, transcripts).
 //!
 //! Blobs live at `blobs/<first two hex digits>/<remaining hex>` under their
-//! BLAKE3 hash. A blob is written to a temporary file, flushed, renamed into
-//! place, and its directory flushed, so it is durable before any event refers
-//! to it. Reads re-hash the content, so silent corruption is detected.
+//! BLAKE3 hash. A blob is written to `blobs/tmp/<random>`, flushed, renamed
+//! into place, and its directory flushed, so it is durable before any event
+//! refers to it. Leftover files in `blobs/tmp/` are swept on open. Reads
+//! re-hash the content, so silent corruption is detected.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use hivemind_core::BlobHash;
@@ -13,6 +15,8 @@ use hivemind_core::BlobHash;
 use crate::error::{Error, Result};
 use crate::fsutil;
 use crate::log::Durability;
+
+const TMP_DIR: &str = "tmp";
 
 #[derive(Debug)]
 pub struct BlobStore {
@@ -23,10 +27,17 @@ pub struct BlobStore {
 impl BlobStore {
     pub fn open(root: PathBuf, durability: Durability) -> Result<Self> {
         fs::create_dir_all(&root)?;
+        let tmp = root.join(TMP_DIR);
+        fs::create_dir_all(&tmp)?;
+        sweep_tmp(&tmp)?;
         Ok(Self {
             root,
             sync: durability == Durability::Fsync,
         })
+    }
+
+    fn tmp_dir(&self) -> PathBuf {
+        self.root.join(TMP_DIR)
     }
 
     fn path(&self, hash: &BlobHash) -> PathBuf {
@@ -44,8 +55,27 @@ impl BlobStore {
         let shard = path.parent().expect("blob paths have a parent");
         let fresh = !path.exists();
         if fresh {
+            fsutil::ensure_disk_space(&self.root, bytes.len() as u64)?;
             fs::create_dir_all(shard)?;
-            fsutil::write_atomic(&path, bytes, self.sync)?;
+            let tmp = self
+                .tmp_dir()
+                .join(uuid::Uuid::now_v7().simple().to_string());
+            let result = (|| -> Result<()> {
+                let mut file = File::create(&tmp)?;
+                file.write_all(bytes)?;
+                if self.sync {
+                    file.sync_all()?;
+                }
+                fs::rename(&tmp, &path)?;
+                if self.sync {
+                    fsutil::sync_dir(shard)?;
+                }
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
+            result?;
         }
         if self.sync {
             if !fresh {
@@ -80,6 +110,10 @@ impl BlobStore {
                 continue;
             }
             let prefix = shard.file_name().to_string_lossy().into_owned();
+            // Staging directory for in-flight writes; not a content shard.
+            if prefix == TMP_DIR {
+                continue;
+            }
             for entry in fs::read_dir(shard.path())? {
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().into_owned();
@@ -102,6 +136,21 @@ impl BlobStore {
     }
 }
 
+/// Removes leftover files from an interrupted blob put. Best-effort: a missing
+/// `tmp/` is fine; failures listing or removing entries surface as errors.
+fn sweep_tmp(tmp: &Path) -> Result<()> {
+    for entry in fs::read_dir(tmp)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
 fn check(path: &Path, hash: &BlobHash, bytes: &[u8]) -> Result<()> {
     if BlobHash::of(bytes) == *hash {
         Ok(())
@@ -117,6 +166,7 @@ fn check(path: &Path, hash: &BlobHash, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fsutil::{DISK_SAFETY_MARGIN, with_free_bytes};
 
     #[test]
     fn stores_deduplicates_and_detects_corruption() {
@@ -134,5 +184,53 @@ mod tests {
 
         let missing = BlobHash::of(b"never stored");
         assert!(matches!(blobs.get(&missing), Err(Error::NotFound(_))));
+    }
+
+    #[test]
+    fn open_sweeps_stray_files_in_tmp() {
+        let root = tempfile::tempdir().unwrap();
+        let tmp = root.path().join(TMP_DIR);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("leftover-a"), b"partial").unwrap();
+        fs::create_dir_all(tmp.join("nested")).unwrap();
+        fs::write(tmp.join("nested").join("leftover-b"), b"more").unwrap();
+
+        let blobs = BlobStore::open(root.path().to_path_buf(), Durability::NoFsync).unwrap();
+        assert!(
+            fs::read_dir(blobs.tmp_dir()).unwrap().next().is_none(),
+            "tmp/ should be empty after open"
+        );
+        // A real put still works and leaves no staging residue.
+        blobs.put(b"ok").unwrap();
+        assert!(fs::read_dir(blobs.tmp_dir()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn put_refuses_when_disk_is_full() {
+        let root = tempfile::tempdir().unwrap();
+        let blobs = BlobStore::open(root.path().to_path_buf(), Durability::NoFsync).unwrap();
+        let payload = vec![0u8; 128];
+        with_free_bytes(Some(DISK_SAFETY_MARGIN), || {
+            let err = blobs.put(&payload).unwrap_err();
+            assert!(
+                matches!(err, Error::DiskFull { available, needed }
+                    if available == DISK_SAFETY_MARGIN
+                        && needed == DISK_SAFETY_MARGIN + payload.len() as u64),
+                "{err}"
+            );
+        });
+        // No staged leftovers and no shard content after a refused put.
+        assert!(fs::read_dir(blobs.tmp_dir()).unwrap().next().is_none());
+        assert_eq!(blobs.verify_all().unwrap(), (0, vec![]));
+    }
+
+    #[test]
+    fn duplicate_put_skips_disk_space_check() {
+        let root = tempfile::tempdir().unwrap();
+        let blobs = BlobStore::open(root.path().to_path_buf(), Durability::NoFsync).unwrap();
+        let (hash, _) = blobs.put(b"already there").unwrap();
+        with_free_bytes(Some(0), || {
+            assert_eq!(blobs.put(b"already there").unwrap(), (hash, false));
+        });
     }
 }

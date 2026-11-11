@@ -28,7 +28,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::fsutil;
+use crate::fsutil::{self, ensure_disk_space};
 
 pub const SEGMENT_MAGIC: [u8; 8] = *b"HMLOG\0\0\x01";
 pub const SEGMENT_FORMAT: u32 = 1;
@@ -210,6 +210,13 @@ impl Log {
         }
         let crc = record_crc(&record);
         record[4..8].copy_from_slice(&crc.to_le_bytes());
+
+        // Refuse before any write so a DiskFull (or similar) does not poison.
+        let mut needed = record.len() as u64;
+        if self.active_len >= self.segment_bytes {
+            needed = needed.saturating_add(SEGMENT_HEADER_LEN);
+        }
+        ensure_disk_space(&self.dir, needed)?;
 
         let result = self.write_record(&record);
         if let Err(e) = result {
@@ -751,6 +758,27 @@ mod tests {
         let huge = vec![0u8; MAX_RECORD_LEN as usize + 1];
         assert!(matches!(log.append(&[huge]), Err(Error::RecordTooLarge(_))));
         assert_eq!(log.append(&[event(0)]).unwrap(), 0);
+    }
+
+    #[test]
+    fn disk_full_is_rejected_without_poisoning() {
+        use crate::fsutil::{DISK_SAFETY_MARGIN, with_free_bytes};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut log, _, _) = open(tmp.path());
+        with_free_bytes(Some(0), || {
+            let err = log.append(&[event(0)]).unwrap_err();
+            match err {
+                Error::DiskFull { available, needed } => {
+                    assert_eq!(available, 0);
+                    assert!(needed > DISK_SAFETY_MARGIN, "needed={needed}");
+                }
+                other => panic!("expected DiskFull, got {other}"),
+            }
+        });
+        // Next append still works: the log was not poisoned.
+        assert_eq!(log.append(&[event(0)]).unwrap(), 0);
+        assert_eq!(log.next_offset(), 1);
     }
 
     #[test]

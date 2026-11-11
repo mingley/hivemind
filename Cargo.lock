@@ -557,6 +557,7 @@ dependencies = [
  "hivemind-core",
  "parking_lot",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
