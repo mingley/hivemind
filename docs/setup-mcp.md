@@ -2,7 +2,7 @@
 
 Status: M1 (2026-11-11). Local stdio only. Not production-ready: no
 authentication beyond the local Unix socket, no remote transport, and the
-RSS mitigations planned for M1 are still open (see
+token-type caps landed; keydir/full interning still open (see
 [06](06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11)).
 
 hivemind exposes memory to coding agents as an MCP server. The agent talks
@@ -45,7 +45,7 @@ export HIVEMIND_DIR="$HOME/.hivemind/store"
 |---|---|
 | `hivemindd` | Single owner of one store. Binds `<store>/run/hivemindd.sock` (`0700` dir, `0600` socket). Idle-exits after no clients (default 600s). |
 | `hivemind mcp --dir …` | Stdio MCP shim (`rmcp`). Connects to the daemon, or starts `hivemindd` if the socket is missing. |
-| `hivemind …` | CLI for the same store (embedded open today; prefers a running daemon when wired that way). |
+| `hivemind …` | CLI for the same store; prefers a live daemon socket, else opens the store directly. |
 
 Default store path: `~/.hivemind/store`. Override with `--dir` or
 `HIVEMIND_DIR`.

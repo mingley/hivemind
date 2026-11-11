@@ -149,10 +149,12 @@ change until then):
 
 **Still open from the M1 brief (honest gaps):**
 
-- **RSS mitigations** called out after M0 (compact claim rows / keydir,
-  interning of scopes and principals, token-type caps) are **not** landed.
-  The 230 MB / 100k-claim M0 measurement still stands; no new RSS number is
-  claimed here.
+- **RSS mitigations** from the M0 miss: **token-type caps** are landed
+  (default 250k distinct terms; further rare tokens are dropped from the
+  dictionary). Scope names use `Arc<str>` as a step toward interning.
+  Compact claim rows / keydir and full string interning are **not** landed
+  yet. The 230 MB / 100k-claim M0 measurement still stands; no new RSS
+  number is claimed here.
 - **Sandbox questions** remain unanswered: whether Claude Code, Codex, and
   Copilot CLI sandboxes allow a Unix socket or a spawned daemon. The setup
   doc records the workaround of starting `hivemindd` outside the sandbox.

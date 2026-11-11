@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -14,14 +15,15 @@ const MAX_NAME_LEN: usize = 200;
 )]
 pub struct ScopeParseError(pub String);
 
+/// Visibility scope. Names are [`Arc<str>`] so a store can intern repeated scopes.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Scope {
     Global,
-    Org(String),
-    Team(String),
-    Project(String),
-    Agent(String),
-    Session(String),
+    Org(Arc<str>),
+    Team(Arc<str>),
+    Project(Arc<str>),
+    Agent(Arc<str>),
+    Session(Arc<str>),
 }
 
 fn valid_name(name: &str) -> bool {
@@ -58,7 +60,7 @@ impl Scope {
             | Scope::Team(n)
             | Scope::Project(n)
             | Scope::Agent(n)
-            | Scope::Session(n) => Some(n),
+            | Scope::Session(n) => Some(n.as_ref()),
         }
     }
 
@@ -71,6 +73,18 @@ impl Scope {
             Scope::Project(_) => 3,
             Scope::Agent(_) => 4,
             Scope::Session(_) => 5,
+        }
+    }
+
+    /// Replaces the name with an interned [`Arc`] when the scope is not global.
+    pub fn with_name(self, name: Arc<str>) -> Self {
+        match self {
+            Scope::Global => Scope::Global,
+            Scope::Org(_) => Scope::Org(name),
+            Scope::Team(_) => Scope::Team(name),
+            Scope::Project(_) => Scope::Project(name),
+            Scope::Agent(_) => Scope::Agent(name),
+            Scope::Session(_) => Scope::Session(name),
         }
     }
 }
@@ -102,7 +116,7 @@ impl FromStr for Scope {
         if !valid_name(name) {
             return Err(err());
         }
-        let name = name.to_owned();
+        let name: Arc<str> = Arc::from(name);
         match kind {
             "org" => Ok(Scope::Org(name)),
             "team" => Ok(Scope::Team(name)),
@@ -163,7 +177,7 @@ mod tests {
     #[test]
     fn validate_catches_scopes_built_directly() {
         assert!(Scope::Project("My Projects/app".into()).validate().is_err());
-        assert!(Scope::Team(String::new()).validate().is_err());
+        assert!(Scope::Team(Arc::from("")).validate().is_err());
         assert!(Scope::Project("acme/api".into()).validate().is_ok());
         assert!(Scope::Global.validate().is_ok());
     }

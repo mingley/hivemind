@@ -6,6 +6,10 @@
 //! (`openssl`, `sys`, `ssl`, `ctx`) and camelCase pieces. Exact and partial
 //! queries both match, and exact matches score higher because they hit more
 //! tokens.
+//!
+//! Distinct token types are capped ([`LexicalIndex::max_terms`]). Once the
+//! dictionary is full, rare new tokens are dropped so vocabulary growth from
+//! code-like text cannot unbounded-grow RSS.
 
 use std::collections::HashMap;
 
@@ -13,6 +17,9 @@ use std::collections::HashMap;
 pub const K1: f32 = 1.2;
 /// BM25 document-length normalization.
 pub const B: f32 = 0.75;
+/// Default dictionary cap: high enough for small and medium stores; the 100k
+/// synthetic bench peaked around 207k terms.
+pub const DEFAULT_MAX_TERMS: usize = 500_000;
 const MAX_TOKEN_CHARS: usize = 64;
 /// Characters that join words into one identifier, path, or version.
 const GLUE: &[char] = &['_', '-', '.', '/', ':', '@', '+', '#', '$', '\\'];
@@ -80,16 +87,44 @@ fn split_camel(word: &str) -> Vec<&str> {
 /// Postings per term, document lengths, and corpus statistics. Documents are
 /// dense, increasing IDs added once and never edited, because claims are
 /// immutable. Excluding inactive documents is the caller's job.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct LexicalIndex {
     dict: HashMap<String, u32>,
     /// Term ID to `(doc, term frequency)` pairs, in increasing doc order.
     postings: Vec<Vec<(u32, u32)>>,
     doc_len: Vec<u32>,
     total_len: u64,
+    max_terms: usize,
+    /// Times a new token was skipped because the dictionary was at capacity.
+    dropped_new_terms: u64,
+}
+
+impl Default for LexicalIndex {
+    fn default() -> Self {
+        Self::with_max_terms(DEFAULT_MAX_TERMS)
+    }
 }
 
 impl LexicalIndex {
+    pub fn with_max_terms(max_terms: usize) -> Self {
+        Self {
+            dict: HashMap::new(),
+            postings: Vec::new(),
+            doc_len: Vec::new(),
+            total_len: 0,
+            max_terms: max_terms.max(1),
+            dropped_new_terms: 0,
+        }
+    }
+
+    pub fn max_terms(&self) -> usize {
+        self.max_terms
+    }
+
+    pub fn dropped_new_terms(&self) -> u64 {
+        self.dropped_new_terms
+    }
+
     pub fn add(&mut self, doc: u32, text: &str) {
         debug_assert_eq!(
             doc as usize,
@@ -104,6 +139,10 @@ impl LexicalIndex {
         for (term, tf) in frequencies {
             let id = match self.dict.get(term) {
                 Some(&id) => id,
+                None if self.dict.len() >= self.max_terms => {
+                    self.dropped_new_terms += 1;
+                    continue;
+                }
                 None => {
                     let id = self.postings.len() as u32;
                     self.dict.insert(term.to_owned(), id);
@@ -244,5 +283,23 @@ mod tests {
         hits.sort_by(|a, b| b.1.total_cmp(&a.1));
         assert_eq!(hits[0].0, 1);
         assert!(index.search("kubernetes").is_empty());
+    }
+
+    #[test]
+    fn caps_distinct_token_types_and_drops_rare_new_terms() {
+        let mut index = LexicalIndex::with_max_terms(3);
+        index.add(0, "alpha beta gamma");
+        assert_eq!(index.terms(), 3);
+        assert_eq!(index.dropped_new_terms(), 0);
+        index.add(1, "alpha delta epsilon");
+        assert_eq!(index.terms(), 3, "new tokens past the cap are not admitted");
+        assert!(index.dropped_new_terms() >= 2);
+        let hits = index.search("alpha");
+        assert_eq!(hits.len(), 2, "known terms still post for later docs");
+        assert!(
+            index.search("delta").is_empty(),
+            "dropped new tokens are not searchable"
+        );
+        assert!(index.search("gamma").iter().any(|(doc, _)| *doc == 0));
     }
 }

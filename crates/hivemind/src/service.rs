@@ -1,6 +1,5 @@
 //! Transport-independent handlers over a [`hivemind_engine::Store`].
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
@@ -352,6 +351,3 @@ struct ChangesParams {
     limit: Option<usize>,
     filter: Option<ChangesFilterParams>,
 }
-
-#[allow(dead_code)]
-fn _unused_btreemap(_: BTreeMap<String, String>) {}

@@ -2,9 +2,10 @@
 
 Status: **implemented / historical** (2026-11-11). Milestone **M1 Daemon and
 MCP** from [06](06-prototype-plan.md) is done for the daemon, MCP shim, change
-feed, and setup docs. Keep this file as the contract snapshot used while the
-work was split across crates; prefer [06](06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11)
-and [setup-mcp.md](setup-mcp.md) for current status and operator docs.
+feed, setup docs, and token-type caps. Keep this file as the contract snapshot
+used while the work was split across crates; prefer
+[06](06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11) and
+[setup-mcp.md](setup-mcp.md) for current status and operator docs.
 
 Items below that were **not** finished in M1 are marked *deferred*.
 
@@ -14,8 +15,8 @@ Items below that were **not** finished in M1 are marked *deferred*.
 2. `hivemind mcp`: thin stdio shim via `rmcp` (MCP 2026-07-28). **Done.**
 3. Six MCP tools (deterministic order). **Done.**
 4. `changes_since` change feed + read-your-writes via `min_offset`. **Done.**
-5. Engine RSS mitigations: compact claim rows, string interning, token-type
-   caps. *Deferred* (still open; see M1 status in 06).
+5. Engine RSS mitigations: token-type caps **Done** (default 250k); scope
+   names use `Arc<str>`. Compact claim rows / full interning *Deferred*.
 6. Setup docs for Claude Code, Codex, and Copilot CLI. **Done**
    ([setup-mcp.md](setup-mcp.md)).
 7. Update README and [06](06-prototype-plan.md) when M1 lands. **Done.**
@@ -86,13 +87,11 @@ instructions, and **current code and tests take precedence**.
 - `Store::wait_for_offset(min_offset, timeout) -> Result<()>` **Done.**
 - `Store::changes_since(from, limit, filter) -> Result<Vec<(u64, Event)>>`
   with optional scope / claim / kind filters. **Done.**
+- Cap distinct token types in the lexical dictionary (default 250k). **Done.**
+- Scope names stored as `Arc<str>` (cheap clone toward interning). **Done.**
 - Compact claim projection ("keydir"): keep filter/rank fields in RAM; load
-  full `ClaimData` from the log by offset on demand (`show`, card expansion).
-  *Deferred.*
-- Intern scopes, principals, and entity keys. *Deferred.*
-- Cap distinct token types in the lexical dictionary (drop rare tail tokens
-  beyond a configurable cap; default high enough not to hurt small stores).
-  *Deferred.*
+  full `ClaimData` from the log by offset on demand. *Deferred.*
+- Intern principals and entity keys across projections. *Deferred.*
 
 ## Crate layout
 

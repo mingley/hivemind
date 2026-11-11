@@ -15,9 +15,7 @@ use hivemind_core::{
     Actor, ActorKind, BlobHash, Citation, ClaimData, ClaimId, ClaimKind, EdgeKind, EvidenceRef,
     Method, Origin, Outcome, Provenance, RetractReason, Scope, Timestamp,
 };
-use hivemind_engine::{
-    ClaimDetail, Durability, Options, Query, Recall, Receipt, Remember, Store, render_card,
-};
+use hivemind_engine::{ClaimDetail, Query, Recall, Receipt, Remember, Store, render_card};
 use serde::Serialize;
 
 #[derive(Parser, Debug)]
@@ -345,25 +343,26 @@ fn run(cli: Cli) -> Result<()> {
         _ => {}
     }
 
-    let options = Options {
-        durability: if cli.no_fsync {
-            Durability::NoFsync
-        } else {
-            Durability::Fsync
-        },
-        ..Options::default()
-    };
-    let store = Store::open(&dir, options)
+    let mut backend = hivemind::backend::Backend::open(&dir, cli.no_fsync)
         .with_context(|| format!("opening store at {}", dir.display()))?;
-    let recovery = store.recovery();
-    if recovery.truncated_bytes > 0 {
-        eprintln!(
-            "warning: removed {} bytes of a torn, unacknowledged write from the end of the log; recorded as a `recovered` event",
-            recovery.truncated_bytes
-        );
+    if let Some(store) = backend.store() {
+        let recovery = store.recovery();
+        if recovery.truncated_bytes > 0 {
+            eprintln!(
+                "warning: removed {} bytes of a torn, unacknowledged write from the end of the log; recorded as a `recovered` event",
+                recovery.truncated_bytes
+            );
+        }
     }
     let actor = actor(&cli);
     let out = Output { json: cli.json };
+
+    // Prefer the daemon for the core memory commands when it is running.
+    if backend.is_daemon() {
+        return run_via_daemon(&mut backend, &cli, actor, out);
+    }
+
+    let store = backend.store().expect("local backend always has a store");
 
     match cli.command {
         Command::Init => {
@@ -380,7 +379,7 @@ fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
         }
-        Command::Remember(args) => remember(&store, &actor, args, &out),
+        Command::Remember(args) => remember(store, &actor, args, &out),
         Command::Recall(args) => {
             let query = Query {
                 text: args.query.join(" "),
@@ -412,7 +411,7 @@ fn run(cli: Cli) -> Result<()> {
             if out.json {
                 out.print_json(&detail)
             } else {
-                print_detail(&store, &detail, args.evidence)
+                print_detail(store, &detail, args.evidence)
             }
         }
         Command::Retract(args) => {
@@ -437,7 +436,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Link(args) => {
             let from = store.resolve(&args.from)?;
             let to = store.resolve(&args.to)?;
-            let evidence = collect_evidence(&store, &actor, &args.evidence)?;
+            let evidence = collect_evidence(store, &actor, &args.evidence)?;
             let receipt = store.link(
                 &actor,
                 from,
@@ -451,7 +450,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Feedback(args) => {
             let id = store.resolve(&args.id)?;
-            let evidence = collect_evidence(&store, &actor, &args.evidence)?;
+            let evidence = collect_evidence(store, &actor, &args.evidence)?;
             let receipt = store.feedback(
                 &actor,
                 id,
@@ -549,8 +548,196 @@ fn run(cli: Cli) -> Result<()> {
                 ))
             }
         }
-        Command::DebugWriteLoop { count } => debug_write_loop(&store, &actor, count),
+        Command::DebugWriteLoop { count } => debug_write_loop(store, &actor, count),
         Command::Mcp { .. } | Command::Daemon(_) => unreachable!("handled before opening store"),
+    }
+}
+
+fn run_via_daemon(
+    backend: &mut hivemind::backend::Backend,
+    cli: &Cli,
+    actor: Actor,
+    out: Output,
+) -> Result<()> {
+    use serde_json::json;
+    let actor_params = json!({
+        "principal": actor.principal,
+        "agent": actor.agent,
+        "session": actor.session,
+        "human": matches!(actor.kind, ActorKind::Human),
+    });
+    match &cli.command {
+        Command::Init => {
+            let hello = backend
+                .call_daemon("hello", json!({}))?
+                .expect("daemon backend");
+            if out.json {
+                out.print_json(&hello)
+            } else {
+                println!(
+                    "daemon store {} (next offset {})",
+                    hello["store_id"], hello["next_offset"]
+                );
+                Ok(())
+            }
+        }
+        Command::Remember(args) => {
+            let params = json!({
+                "statement": args.statement,
+                "kind": args.kind,
+                "scope": args.scope,
+                "about": args.about,
+                "when": args.when,
+                "fields": args.fields,
+                "supersedes": args.supersedes,
+                "idempotency_key": args.idempotency_key,
+                "actor": actor_params,
+            });
+            let result = backend
+                .call_daemon("remember", params)?
+                .expect("daemon backend");
+            if out.json {
+                out.print_json(&result)
+            } else {
+                println!(
+                    "remembered {} at offset {}",
+                    result["claim"].as_str().unwrap_or("?"),
+                    result["offset"]
+                );
+                Ok(())
+            }
+        }
+        Command::Recall(args) => {
+            let params = json!({
+                "query": args.query.join(" "),
+                "scopes": args.scopes,
+                "kinds": args.kinds,
+                "about": args.about,
+                "ctx": args.context.ctx,
+                "history": args.history,
+                "all_contexts": args.all_contexts,
+                "limit": args.limit,
+                "budget": args.budget,
+            });
+            let result = backend
+                .call_daemon("recall", params)?
+                .expect("daemon backend");
+            // Text mode prints the JSON cards; full card formatting needs a local store.
+            out.print_json(&result)
+        }
+        Command::Show(args) => {
+            let params = json!({
+                "id": args.id,
+                "ctx": args.context.ctx,
+            });
+            let result = backend
+                .call_daemon("show", params)?
+                .expect("daemon backend");
+            if out.json {
+                out.print_json(&result)
+            } else {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                Ok(())
+            }
+        }
+        Command::Retract(args) => {
+            let params = json!({
+                "id": args.id,
+                "reason": args.reason,
+                "note": args.note,
+                "corrected_by": args.corrected_by,
+                "idempotency_key": args.idempotency_key,
+                "actor": actor_params,
+            });
+            let result = backend
+                .call_daemon("retract", params)?
+                .expect("daemon backend");
+            daemon_receipt(&out, &result, "retracted")
+        }
+        Command::Invalidate(args) => {
+            let params = json!({
+                "id": args.id,
+                "reason": args.reason,
+                "at": args.at,
+                "idempotency_key": args.idempotency_key,
+                "actor": actor_params,
+            });
+            let result = backend
+                .call_daemon("invalidate", params)?
+                .expect("daemon backend");
+            daemon_receipt(&out, &result, "invalidated")
+        }
+        Command::Link(args) => {
+            let params = json!({
+                "from": args.from,
+                "to": args.to,
+                "kind": args.kind,
+                "note": args.note,
+                "idempotency_key": args.idempotency_key,
+                "actor": actor_params,
+            });
+            let result = backend
+                .call_daemon("link", params)?
+                .expect("daemon backend");
+            daemon_receipt(&out, &result, "linked")
+        }
+        Command::Feedback(args) => {
+            let params = json!({
+                "id": args.id,
+                "outcome": args.outcome,
+                "note": args.note,
+                "idempotency_key": args.idempotency_key,
+                "actor": actor_params,
+            });
+            let result = backend
+                .call_daemon("feedback", params)?
+                .expect("daemon backend");
+            daemon_receipt(&out, &result, "recorded feedback")
+        }
+        Command::Log(args) => {
+            let params = json!({ "from": args.from, "limit": args.limit });
+            let result = backend
+                .call_daemon("changes_since", params)?
+                .expect("daemon backend");
+            let mut stdout = io::stdout().lock();
+            if let Some(events) = result["events"].as_array() {
+                for event in events {
+                    serde_json::to_writer(&mut stdout, event)?;
+                    writeln!(stdout)?;
+                }
+            }
+            Ok(())
+        }
+        Command::Stats => {
+            let result = backend
+                .call_daemon("stats", json!({}))?
+                .expect("daemon backend");
+            if out.json {
+                out.print_json(&result)
+            } else {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                Ok(())
+            }
+        }
+        Command::Put(_)
+        | Command::Cat { .. }
+        | Command::Verify
+        | Command::DebugWriteLoop { .. } => Err(anyhow!(
+            "this command needs direct store access; stop hivemindd or use a different --dir"
+        )),
+        Command::Mcp { .. } | Command::Daemon(_) => unreachable!("handled earlier"),
+    }
+}
+
+fn daemon_receipt(out: &Output, result: &serde_json::Value, verb: &str) -> Result<()> {
+    if out.json {
+        out.print_json(result)
+    } else {
+        println!(
+            "{verb} at offset {}",
+            result["offset"].as_u64().unwrap_or(0)
+        );
+        Ok(())
     }
 }
 
