@@ -212,7 +212,9 @@ pub(crate) fn recall(state: &State, query: &Query) -> Recall {
             if state.vectors.ann_built() {
                 state.vectors.search_ann(qv, limit)
             } else {
-                state.vectors.search(qv, limit, query.vector_rescore.unwrap_or(32))
+                state
+                    .vectors
+                    .search(qv, limit, query.vector_rescore.unwrap_or(32))
             }
         })
         .unwrap_or_default();

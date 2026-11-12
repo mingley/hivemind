@@ -31,6 +31,8 @@ use crate::error::{Error, Result};
 use crate::fsutil::{self, ensure_disk_space};
 
 pub const SEGMENT_MAGIC: [u8; 8] = *b"HMLOG\0\0\x01";
+/// On-disk segment header format. Bump only with a deliberate migration; golden
+/// fixtures in `tests/fixtures/log/` freeze the bytes for this value.
 pub const SEGMENT_FORMAT: u32 = 1;
 pub const SEGMENT_HEADER_LEN: u64 = 32;
 pub const RECORD_HEADER_LEN: u64 = 20;
@@ -38,6 +40,37 @@ pub const RECORD_HEADER_LEN: u64 = 20;
 pub const MAX_RECORD_LEN: u32 = 16 * 1024 * 1024;
 pub const DEFAULT_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 const SEGMENT_SUFFIX: &str = ".hlog";
+
+/// Why a commit record failed to decode. Soft failures (torn tails) use this
+/// rather than [`Error::Corruption`], which needs a file path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FrameError {
+    TruncatedHeader,
+    TruncatedPayload,
+    LengthExceedsLimit(u32),
+    ChecksumMismatch,
+    OffsetMismatch { got: u64, expected: u64 },
+    MalformedPayload,
+    EmptyBatch,
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameError::TruncatedHeader => f.write_str("truncated record header"),
+            FrameError::TruncatedPayload => f.write_str("truncated record payload"),
+            FrameError::LengthExceedsLimit(len) => {
+                write!(f, "record length {len} exceeds the limit")
+            }
+            FrameError::ChecksumMismatch => f.write_str("record checksum mismatch"),
+            FrameError::OffsetMismatch { got, expected } => {
+                write!(f, "record starts at offset {got}, expected {expected}")
+            }
+            FrameError::MalformedPayload => f.write_str("record payload is malformed"),
+            FrameError::EmptyBatch => f.write_str("record payload is malformed"),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Durability {
@@ -206,25 +239,8 @@ impl Log {
         if events.is_empty() {
             return Ok(first);
         }
-        let payload_len: usize = events.iter().map(|e| 4 + e.len()).sum();
-        let len = u32::try_from(payload_len)
-            .ok()
-            .filter(|len| *len <= MAX_RECORD_LEN)
-            .ok_or(Error::RecordTooLarge(payload_len))?;
-        let count = u32::try_from(events.len()).map_err(|_| Error::RecordTooLarge(payload_len))?;
-
-        let mut record = Vec::with_capacity(RECORD_HEADER_LEN as usize + payload_len);
-        record.extend_from_slice(&len.to_le_bytes());
-        record.extend_from_slice(&[0; 4]);
-        record.extend_from_slice(&first.to_le_bytes());
-        record.extend_from_slice(&count.to_le_bytes());
-        for event in events {
-            // Each length fits: the total was checked against MAX_RECORD_LEN.
-            record.extend_from_slice(&(event.len() as u32).to_le_bytes());
-            record.extend_from_slice(event);
-        }
-        let crc = record_crc(&record);
-        record[4..8].copy_from_slice(&crc.to_le_bytes());
+        let record = encode_record(first, events)?;
+        let count = u32::try_from(events.len()).expect("checked in encode_record");
 
         // Refuse before any write so a DiskFull (or similar) does not poison.
         let mut needed = record.len() as u64;
@@ -391,7 +407,8 @@ fn list_segments(dir: &Path) -> Result<Vec<u64>> {
     Ok(bases)
 }
 
-fn segment_header(base: u64) -> [u8; SEGMENT_HEADER_LEN as usize] {
+/// Builds the 32-byte segment header for `base` (format [`SEGMENT_FORMAT`]).
+pub fn encode_segment_header(base: u64) -> [u8; SEGMENT_HEADER_LEN as usize] {
     let mut header = [0u8; SEGMENT_HEADER_LEN as usize];
     header[0..8].copy_from_slice(&SEGMENT_MAGIC);
     header[8..12].copy_from_slice(&SEGMENT_FORMAT.to_le_bytes());
@@ -399,6 +416,99 @@ fn segment_header(base: u64) -> [u8; SEGMENT_HEADER_LEN as usize] {
     let crc = crc32c::crc32c(&header[0..24]);
     header[24..28].copy_from_slice(&crc.to_le_bytes());
     header
+}
+
+/// Encodes one commit record: `len ‖ crc ‖ first_offset ‖ count ‖ payload`.
+///
+/// The CRC covers `len ‖ first_offset ‖ count ‖ payload` (everything except the
+/// CRC field). Empty `events` is rejected; oversized batches return
+/// [`Error::RecordTooLarge`].
+pub fn encode_record(first_offset: u64, events: &[Vec<u8>]) -> Result<Vec<u8>> {
+    if events.is_empty() {
+        return Err(Error::Invalid(
+            "commit record requires at least one event".into(),
+        ));
+    }
+    let payload_len: usize = events.iter().map(|e| 4 + e.len()).sum();
+    let len = u32::try_from(payload_len)
+        .ok()
+        .filter(|len| *len <= MAX_RECORD_LEN)
+        .ok_or(Error::RecordTooLarge(payload_len))?;
+    let count = u32::try_from(events.len()).map_err(|_| Error::RecordTooLarge(payload_len))?;
+
+    let mut record = Vec::with_capacity(RECORD_HEADER_LEN as usize + payload_len);
+    record.extend_from_slice(&len.to_le_bytes());
+    record.extend_from_slice(&[0; 4]);
+    record.extend_from_slice(&first_offset.to_le_bytes());
+    record.extend_from_slice(&count.to_le_bytes());
+    for event in events {
+        // Each length fits: the total was checked against MAX_RECORD_LEN.
+        record.extend_from_slice(&(event.len() as u32).to_le_bytes());
+        record.extend_from_slice(event);
+    }
+    let crc = record_crc(&record);
+    record[4..8].copy_from_slice(&crc.to_le_bytes());
+    Ok(record)
+}
+
+/// One decoded commit: bytes consumed, then `(offset, event_bytes)` pairs.
+pub type DecodedRecord = (usize, Vec<(u64, Vec<u8>)>);
+
+/// Validates a commit record that starts at `bytes[0]` and returns how many
+/// bytes it consumes plus each `(offset, event)` pair.
+///
+/// Used by recovery and by property/fuzz tests so the on-disk layout stays
+/// covered without going through the filesystem.
+pub fn try_decode_record(
+    expected_first: u64,
+    bytes: &[u8],
+) -> std::result::Result<DecodedRecord, FrameError> {
+    if bytes.len() < RECORD_HEADER_LEN as usize {
+        return Err(FrameError::TruncatedHeader);
+    }
+    let len = u32_at(bytes, 0);
+    let crc = u32_at(bytes, 4);
+    let first = u64_at(bytes, 8);
+    let count = u32_at(bytes, 16);
+    if len > MAX_RECORD_LEN {
+        return Err(FrameError::LengthExceedsLimit(len));
+    }
+    let total = RECORD_HEADER_LEN as usize + len as usize;
+    if bytes.len() < total {
+        return Err(FrameError::TruncatedPayload);
+    }
+    let record = &bytes[..total];
+    if record_crc(record) != crc {
+        return Err(FrameError::ChecksumMismatch);
+    }
+    if first != expected_first {
+        return Err(FrameError::OffsetMismatch {
+            got: first,
+            expected: expected_first,
+        });
+    }
+    if count == 0 {
+        return Err(FrameError::EmptyBatch);
+    }
+    let mut events = Vec::with_capacity(count as usize);
+    let mut at = RECORD_HEADER_LEN as usize;
+    for i in 0..u64::from(count) {
+        if at + 4 > record.len() {
+            return Err(FrameError::MalformedPayload);
+        }
+        let event_len = u32_at(record, at) as usize;
+        let start = at + 4;
+        let end = start + event_len;
+        if end > record.len() {
+            return Err(FrameError::MalformedPayload);
+        }
+        events.push((first + i, record[start..end].to_vec()));
+        at = end;
+    }
+    if at != record.len() {
+        return Err(FrameError::MalformedPayload);
+    }
+    Ok((total, events))
 }
 
 /// Creates an empty segment atomically, so a segment file either exists with a
@@ -413,7 +523,7 @@ fn create_segment(dir: &Path, base: u64, durability: Durability) -> Result<()> {
     }
     fsutil::write_atomic(
         &path,
-        &segment_header(base),
+        &encode_segment_header(base),
         durability == Durability::Fsync,
     )?;
     Ok(())
@@ -514,54 +624,42 @@ impl SegmentReader {
             return Ok(Step::End);
         }
         if remaining < RECORD_HEADER_LEN {
-            return self.bad("truncated record header");
+            return self.bad(FrameError::TruncatedHeader.to_string());
         }
+        // Peek the length so we know how many bytes to pull before validating.
         self.record.resize(RECORD_HEADER_LEN as usize, 0);
         self.reader.read_exact(&mut self.record)?;
         let len = u32_at(&self.record, 0);
-        let crc = u32_at(&self.record, 4);
-        let first = u64_at(&self.record, 8);
-        let count = u32_at(&self.record, 16);
         if len > MAX_RECORD_LEN {
-            return self.bad(format!("record length {len} exceeds the limit"));
+            return self.bad(FrameError::LengthExceedsLimit(len).to_string());
         }
         if remaining - RECORD_HEADER_LEN < u64::from(len) {
-            return self.bad("truncated record payload");
+            return self.bad(FrameError::TruncatedPayload.to_string());
         }
         self.record
             .resize(RECORD_HEADER_LEN as usize + len as usize, 0);
         self.reader
             .read_exact(&mut self.record[RECORD_HEADER_LEN as usize..])?;
-        if record_crc(&self.record) != crc {
-            return self.bad("record checksum mismatch");
-        }
-        if first != self.next_offset {
-            return self.bad(format!(
-                "record starts at offset {first}, expected {}",
-                self.next_offset
-            ));
-        }
-        // The checksum matched, so a malformed payload is a writer bug, not a torn write.
-        let mut at = RECORD_HEADER_LEN as usize;
-        for i in 0..u64::from(count) {
-            if at + 4 > self.record.len() {
-                return self.bad("record payload is malformed");
+        match try_decode_record(self.next_offset, &self.record) {
+            Ok((consumed, decoded)) => {
+                debug_assert_eq!(consumed, self.record.len());
+                // Keep event bytes borrowed from `self.record` for zero-copy scan.
+                let mut at = RECORD_HEADER_LEN as usize;
+                for (offset, event) in &decoded {
+                    let start = at + 4;
+                    let end = start + event.len();
+                    debug_assert_eq!(&self.record[start..end], event.as_slice());
+                    self.events.push((*offset, start, end));
+                    at = end;
+                }
+                let first = decoded[0].0;
+                let count = decoded.len() as u64;
+                self.pos += consumed as u64;
+                self.next_offset = first + count;
+                Ok(Step::Record)
             }
-            let event_len = u32_at(&self.record, at) as usize;
-            let start = at + 4;
-            let end = start + event_len;
-            if end > self.record.len() {
-                return self.bad("record payload is malformed");
-            }
-            self.events.push((first + i, start, end));
-            at = end;
+            Err(err) => self.bad(err.to_string()),
         }
-        if count == 0 || at != self.record.len() {
-            return self.bad("record payload is malformed");
-        }
-        self.pos += RECORD_HEADER_LEN + u64::from(len);
-        self.next_offset = first + u64::from(count);
-        Ok(Step::Record)
     }
 
     fn events(&self) -> impl Iterator<Item = (u64, &[u8])> {
@@ -809,5 +907,63 @@ mod tests {
             log.append(&[event(i)]).unwrap();
         }
         assert!(log.view().segment_count() > 1);
+    }
+
+    #[test]
+    fn encode_record_roundtrips_and_matches_append_bytes() {
+        let events = vec![event(0), event(1)];
+        let encoded = encode_record(0, &events).unwrap();
+        let (consumed, decoded) = try_decode_record(0, &encoded).unwrap();
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded, vec![(0, event(0)), (1, event(1))]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut log, _, _) = open(tmp.path());
+        log.append(&events).unwrap();
+        drop(log);
+        let on_disk = fs::read(only_segment(tmp.path())).unwrap();
+        assert_eq!(&on_disk[SEGMENT_HEADER_LEN as usize..], encoded.as_slice());
+    }
+
+    #[test]
+    fn segment_format_version_is_explicit_and_enforced() {
+        assert_eq!(SEGMENT_FORMAT, 1);
+        assert_eq!(&SEGMENT_MAGIC, b"HMLOG\0\0\x01");
+        let tmp = tempfile::tempdir().unwrap();
+        let (log, _, _) = open(tmp.path());
+        drop(log);
+        let path = only_segment(tmp.path());
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[8..12].copy_from_slice(&2u32.to_le_bytes());
+        let crc = crc32c::crc32c(&bytes[0..24]);
+        bytes[24..28].copy_from_slice(&crc.to_le_bytes());
+        fs::write(&path, &bytes).unwrap();
+        let err = open_with(tmp.path(), DEFAULT_SEGMENT_BYTES).unwrap_err();
+        match err {
+            Error::Format(msg) => {
+                assert!(msg.contains("format 2"), "{msg}");
+                assert!(msg.contains("format 1"), "{msg}");
+            }
+            other => panic!("expected Format, got {other}"),
+        }
+    }
+
+    #[test]
+    fn try_decode_record_rejects_truncated_and_bad_crc() {
+        let events = [event(0)];
+        let mut record = encode_record(0, &events).unwrap();
+        assert_eq!(
+            try_decode_record(0, &record[..RECORD_HEADER_LEN as usize - 1]),
+            Err(FrameError::TruncatedHeader)
+        );
+        assert_eq!(
+            try_decode_record(0, &record[..record.len() - 1]),
+            Err(FrameError::TruncatedPayload)
+        );
+        record[9] ^= 0xff;
+        assert_eq!(
+            try_decode_record(0, &record),
+            Err(FrameError::ChecksumMismatch)
+        );
     }
 }

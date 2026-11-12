@@ -29,7 +29,10 @@ pub mod vector;
 
 pub use error::{Error, Result};
 pub use indexseg::LexicalSegment;
-pub use log::{Durability, Recovery};
+pub use log::{
+    Durability, FrameError, MAX_RECORD_LEN, Recovery, SEGMENT_FORMAT, SEGMENT_MAGIC, encode_record,
+    encode_segment_header, try_decode_record,
+};
 pub use recall::{Card, ClaimDetail, Flag, Query, Recall, render_card};
 pub use snapshot::SnapshotInfo;
 pub use state::{ArtifactRow, Belief, LeaseRow, STATEMENT_CACHE_CHARS};

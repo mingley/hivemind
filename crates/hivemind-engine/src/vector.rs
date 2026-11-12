@@ -504,7 +504,11 @@ mod tests {
                 "doc{doc} topic{} fragment{} {}",
                 doc % 17,
                 doc % 9,
-                if doc % 3 == 0 { "openssl macos" } else { "misc" }
+                if doc % 3 == 0 {
+                    "openssl macos"
+                } else {
+                    "misc"
+                }
             );
             index.upsert_f32(doc, embedder.embed(&text)).unwrap();
         }
@@ -513,10 +517,7 @@ mod tests {
         let exact = index.search(&q, 10, 0);
         let ann = index.search_ann(&q, 10);
         let exact_docs: HashSet<u32> = exact.iter().map(|(d, _)| *d).collect();
-        let overlap = ann
-            .iter()
-            .filter(|(d, _)| exact_docs.contains(d))
-            .count();
+        let overlap = ann.iter().filter(|(d, _)| exact_docs.contains(d)).count();
         assert!(
             overlap >= 7,
             "ANN top-10 should overlap exact top-10 (got {overlap}/10); exact={exact:?} ann={ann:?}"

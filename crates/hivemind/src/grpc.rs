@@ -22,8 +22,7 @@ pub mod pb {
 
 use pb::hivemind_server::{Hivemind, HivemindServer};
 use pb::{
-    ChangesSinceRequest, ChangesSinceResponse, HelloRequest, HelloResponse, RpcRequest,
-    RpcResponse,
+    ChangesSinceRequest, ChangesSinceResponse, HelloRequest, HelloResponse, RpcRequest, RpcResponse,
 };
 
 #[derive(Clone)]
@@ -77,12 +76,15 @@ pub async fn serve(args: GrpcArgs) -> Result<()> {
 
 #[tonic::async_trait]
 impl Hivemind for GrpcState {
-    async fn hello(&self, request: Request<HelloRequest>) -> Result<Response<HelloResponse>, Status> {
+    async fn hello(
+        &self,
+        request: Request<HelloRequest>,
+    ) -> Result<Response<HelloResponse>, Status> {
         self.authorize(&request)?;
         let tenant = request.into_inner().tenant;
         let service = self.service_for(&tenant)?;
-        let json = serde_json::to_string(&service.hello())
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let json =
+            serde_json::to_string(&service.hello()).map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(HelloResponse { json }))
     }
 
@@ -99,8 +101,7 @@ impl Hivemind for GrpcState {
         let value = service
             .dispatch(&inner.method, params)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let json =
-            serde_json::to_string(&value).map_err(|e| Status::internal(e.to_string()))?;
+        let json = serde_json::to_string(&value).map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(RpcResponse { json }))
     }
 
@@ -111,15 +112,18 @@ impl Hivemind for GrpcState {
         self.authorize(&request)?;
         let inner = request.into_inner();
         let service = self.service_for(&inner.tenant)?;
-        let limit = if inner.limit == 0 { 100 } else { inner.limit as usize };
+        let limit = if inner.limit == 0 {
+            100
+        } else {
+            inner.limit as usize
+        };
         let value = service
             .dispatch(
                 "changes_since",
                 json!({ "from": inner.from, "limit": limit }),
             )
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let json =
-            serde_json::to_string(&value).map_err(|e| Status::internal(e.to_string()))?;
+        let json = serde_json::to_string(&value).map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(ChangesSinceResponse { json }))
     }
 }
@@ -130,7 +134,8 @@ impl GrpcState {
             .metadata()
             .get("authorization")
             .and_then(|v| v.to_str().ok());
-        let token = sync::bearer_token(header).map_err(|e| Status::unauthenticated(e.to_string()))?;
+        let token =
+            sync::bearer_token(header).map_err(|e| Status::unauthenticated(e.to_string()))?;
         self.oauth
             .validate_bearer(token, &self.token)
             .map_err(|e| Status::unauthenticated(e.to_string()))
@@ -147,8 +152,8 @@ impl GrpcState {
                 return Ok(svc.clone());
             }
         }
-        let dir = ensure_tenant_dir(&self.root, tenant)
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let dir =
+            ensure_tenant_dir(&self.root, tenant).map_err(|e| Status::internal(e.to_string()))?;
         let store = Store::open(
             &dir,
             Options {

@@ -319,9 +319,16 @@ flowchart LR
 
 ```text
 segment header (32 B): magic "HMLOG\0\0\1" | format u32 | reserved u32 | base_offset u64 | header crc32c u32 | pad
-record:                len u32 | crc32c u32 over (offset ‖ payload) | offset u64 | payload[len]
-payload:               codec u8 (1 = JSON v1) ‖ encoded event
+record:                len u32 | crc32c(len ‖ first_offset ‖ count ‖ payload) u32
+                       | first_offset u64 | count u32 | payload[len]
+payload:               count × (event_len u32 ‖ event bytes)
+event bytes:           codec u8 (1 = JSON v1) ‖ encoded event
 ```
+
+Format freeze for the first release tag: `SEGMENT_FORMAT = 1`,
+`JSON_V1 = 1`, golden fixtures under
+`crates/hivemind-engine/tests/fixtures/`. Residual LazyFS / power-loss CI:
+[f13-crash-injection.md](f13-crash-injection.md).
 
 ### Durability contract (v0)
 

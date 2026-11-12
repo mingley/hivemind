@@ -49,10 +49,8 @@ fn deterministic_ops_survive_reopen_and_match_replay() {
         for step in 0..40u64 {
             match rng.next_usize(4) {
                 0 | 1 => {
-                    let statement = format!(
-                        "sim claim step={step} token={}",
-                        rng.next_u64() % 10_000
-                    );
+                    let statement =
+                        format!("sim claim step={step} token={}", rng.next_u64() % 10_000);
                     let data = ClaimData::new(ClaimKind::Fact, statement, scope());
                     let receipt = store.remember(&actor(), Remember::new(data)).unwrap();
                     acked.insert(receipt.offset);

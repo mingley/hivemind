@@ -115,6 +115,10 @@ Restore: stop writers, copy segments into an empty store directory (or restore
 the whole tenant dir), then open with `hivemind` / `serve`. Prefer offline
 restore; live restore is not supported.
 
+HA is restore-from-segment-backup + this runbook (no multi-node failover).
+Durability release-gate coverage (kill-9, frame/codec properties, goldens) and
+the LazyFS power-loss gap: [f13-crash-injection.md](f13-crash-injection.md).
+
 ## Release binaries (CI)
 
 - **PR / every push to `main`:** `.github/workflows/ci.yml` — installs

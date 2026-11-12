@@ -233,6 +233,11 @@ ignored.
      filesystem.
   3. Disk-full and I/O-error injection.
   4. Afterwards, check log and projection invariants.
+- **CI today (release gate subset):** 12× `kill -9`
+  (`crates/hivemind/tests/crash.rs`); torn-tail / bit-flip / disk-full unit
+  tests; frame + codec property tests; golden fixtures freezing format 1.
+  LazyFS power-loss and the full 1,000-kill loop are tracked as remaining
+  work in [f13-crash-injection.md](f13-crash-injection.md).
 - **Any failure blocks a release.** This tests the configuration, not the
   premise.
 

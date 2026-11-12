@@ -12,7 +12,7 @@ use std::path::Path;
 use memmap2::{Mmap, MmapOptions};
 
 use crate::error::{Error, Result};
-use crate::lexical::{self, LexicalIndex, B, K1};
+use crate::lexical::{self, B, K1, LexicalIndex};
 
 const MAGIC: &[u8; 8] = b"HMLXSEG\x01";
 const HEADER_LEN: usize = 8 + 4 + 8 + 4;
@@ -85,10 +85,7 @@ impl LexicalSegment {
         let path = path.as_ref();
         let mut file = File::open(path)?;
         let len = file.metadata()?.len() as usize;
-        let mut writable = MmapOptions::new()
-            .len(len)
-            .map_anon()
-            .map_err(Error::Io)?;
+        let mut writable = MmapOptions::new().len(len).map_anon().map_err(Error::Io)?;
         file.read_exact(&mut writable).map_err(Error::Io)?;
         let mmap = writable.make_read_only().map_err(Error::Io)?;
         if mmap.len() < HEADER_LEN {

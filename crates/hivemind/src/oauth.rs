@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use base64::Engine as _;
-use base64::engine::general_purpose::{URL_SAFE_NO_PAD, STANDARD};
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -142,7 +142,8 @@ impl OAuthState {
         let (client_id, client_secret) = resolve_client_auth(form, &self.config)?;
         match form.grant_type.as_str() {
             "client_credentials" => {
-                if client_id != self.config.client_id || client_secret != self.config.client_secret {
+                if client_id != self.config.client_id || client_secret != self.config.client_secret
+                {
                     bail!("invalid client credentials");
                 }
                 let token = self.issue_access_token(&client_id, form.resource.as_deref())?;
@@ -186,10 +187,7 @@ impl OAuthState {
                 if !pkce_s256_ok(verifier, &record.code_challenge) {
                     bail!("PKCE verification failed");
                 }
-                let resource = form
-                    .resource
-                    .as_deref()
-                    .or(record.resource.as_deref());
+                let resource = form.resource.as_deref().or(record.resource.as_deref());
                 let token = self.issue_access_token(&client_id, resource)?;
                 Ok(token_response(&token))
             }
@@ -237,10 +235,7 @@ pub struct TokenForm {
     pub scope: Option<String>,
 }
 
-fn resolve_client_auth(
-    form: &TokenForm,
-    config: &OAuthConfig,
-) -> Result<(String, String)> {
+fn resolve_client_auth(form: &TokenForm, config: &OAuthConfig) -> Result<(String, String)> {
     let id = form
         .client_id
         .clone()
@@ -252,7 +247,9 @@ fn resolve_client_auth(
 /// Parse `Authorization: Basic base64(id:secret)` into (id, secret).
 pub fn parse_basic_auth(header: Option<&str>) -> Option<(String, String)> {
     let header = header?;
-    let encoded = header.strip_prefix("Basic ").or_else(|| header.strip_prefix("basic "))?;
+    let encoded = header
+        .strip_prefix("Basic ")
+        .or_else(|| header.strip_prefix("basic "))?;
     let bytes = STANDARD.decode(encoded.trim()).ok()?;
     let pair = String::from_utf8(bytes).ok()?;
     let (id, secret) = pair.split_once(':')?;

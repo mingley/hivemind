@@ -113,6 +113,9 @@ change until then):
 - Harden the frame format, per
   [research/09 §4](../research/09-engine-design-techniques.md#4-wal-and-blob-store-correctness-checklist-and-test-strategy):
   a frame-type byte, a masked CRC, a segment epoch, and a header version.
+  **Partial:** format/codec versions are explicit (`SEGMENT_FORMAT` /
+  `JSON_V1` = 1), covered by golden fixtures and property tests; full
+  research-09 frame redesign deferred (would be a format bump).
 - Evaluate a `postcard` codec (codec 2) next to readable JSON (codec 1).
 - Group commit across concurrent writers through a single writer thread
   (daemon path lands in M1; explicit batching channel still optional).
@@ -124,6 +127,9 @@ change until then):
   - LazyFS on Linux CI;
   - decoder fuzzing;
   - golden fixtures for every format version.
+  **Partial:** decoder/frame property tests + goldens + existing 12×
+  `kill -9` ship in CI; LazyFS / turmoil-fs remain open — see
+  [f13-crash-injection.md](f13-crash-injection.md).
 - `forget`: erasure with a physical purge of log payloads, blobs, and
   projections (M3).
 
