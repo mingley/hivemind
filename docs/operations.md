@@ -236,8 +236,11 @@ hivemind verify                                          # should stay clean aft
 
 Ops packaging (CI gates, release artifacts, `/health` plus `/readyz` `/metrics`,
 structured logs, Dockerfile) has landed. Product gaps that remain out of scope
-for this doc: HA, authenticated multi-tenant isolation hardening beyond bearer
-OAuth, and proving local MCP under restrictive sandboxes. Local MCP setup:
-[setup-mcp.md](setup-mcp.md). Erasure (`forget`) and its online SLA are
-documented above; backup retention remains an operator policy.
+for this doc: HA, and authenticated multi-tenant isolation hardening beyond
+bearer OAuth. **Local MCP:** Claude Code’s default Bash sandbox leaves MCP
+outside the boundary — proven wiring and remember→recall→show smoke live in
+[setup-mcp.md](setup-mcp.md). Footprint: post-mitigation RSS at 100k
+synthetic claims is still ~207 MB (≤ 50 MB miss); see README / [06](06-prototype-plan.md).
+Erasure (`forget`) and its online SLA are documented above; backup retention
+remains an operator policy.
 

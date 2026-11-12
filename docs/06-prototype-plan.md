@@ -153,28 +153,41 @@ change until then):
 - **Setup docs:** [setup-mcp.md](setup-mcp.md) for Claude Code, Codex CLI, and
   Copilot CLI.
 
-**Still open from the M1 brief (honest gaps):**
+**Gaps after M1 (updated 2026-11-12):**
 
-- **RSS mitigations** from the M0 miss are landed in the engine: compact
-  claim rows (keydir + on-demand log load for show), interning of scopes /
-  principals / entity keys, and a configurable lexical token-type cap
-  (default 250k). The 230 MB / 100k-claim M0 measurement is the pre-mitigation
-  baseline; re-measure with the bench example before claiming the ≤ 50 MB
-  target.
-- **Sandbox questions** remain unanswered: whether Claude Code, Codex, and
-  Copilot CLI sandboxes allow a Unix socket or a spawned daemon. The setup
-  doc records the workaround of starting `hivemindd` outside the sandbox.
+- **RSS mitigations landed** (keydir + on-demand log load for show; interning
+  of scopes / principals / entity keys; lexical token-type cap, default
+  250k). **Re-measured** with
+  `cargo run --release -p hivemind-engine --example rss_harness` (same seed
+  as `examples/bench`; RSS via `ps -o rss=` on the harness PID):
+
+  | Host | N claims | Terms | RSS after replay | vs ≤ 50 MB |
+  |---|---|---|---|---|
+  | M0 Apple M4 Pro (pre-mitigation) | 100k | ~207k | 230 MB | ❌ |
+  | linux/x86_64 (post-mitigation, 2026-11-12) | 100k | 250k (cap) | **~207 MB** | ❌ |
+  | linux/x86_64 (post-mitigation) | 10k | ~46k | **~30 MB** | ✅ at this size |
+
+  **Residual:** BM25 dictionary/postings under a large synthetic vocab, plus
+  keydir statement caches. `seal_lexical` does not cut RSS yet
+  (`LexicalSegment::open` anon-copies and the live index stays). Further
+  cheap knobs: lower `Options.max_terms`; real coding corpora share far more
+  tokens than the synthetic bench. Next structural cut: search sealed
+  file-backed segments and drop live postings.
+- **Sandbox (Claude Code answered):** default Claude Code Bash sandbox does
+  **not** cover MCP servers, so `hivemind mcp` → spawn `hivemindd` + Unix
+  socket works without extra allowlists. Codex / Copilot CLI when sandboxed
+  still need socket allowlists or an out-of-sandbox daemon — see
+  [setup-mcp.md](setup-mcp.md#sandbox-answer-claude-code--proven-default-path).
 - **Per-agent identity** is environment-provided only (trust-on-first-use
-  locally); no authenticated credentials yet.
+  locally); shared-service auth is separate (`hivemind serve` / OAuth).
 - **Default event encoding** (JSON v1) was not revisited; postcard remains a
   follow-up.
-- Remote HTTP/gRPC, OAuth, leases/handoffs beyond claim kind, vectors, and
-  `forget` stay out of scope (as planned).
 
 **What this proves / does not prove:** several agents on one machine can share
-a durable store through the MCP shim and change feed. It does not prove remote
-or team use, that memory improves agent outcomes (M2), or that the laptop RSS
-target is met.
+a durable store through the MCP shim and change feed; Claude Code’s default
+sandbox is compatible. It does not prove remote HA, that memory improves
+agent outcomes (M2), or that the ≤ 50 MB RSS target holds at 100k synthetic
+claims.
 
 Working notes that guided the implementation are kept as historical in
 [m1-implementation-notes.md](m1-implementation-notes.md).
@@ -302,7 +315,7 @@ production ANN library under all distributions.
 
 | Question | Why it matters | How we'll answer it |
 |---|---|---|
-| Do agent sandboxes (cloud agents, restricted CLIs) allow a Unix socket or a spawned daemon? | Decides the default local transport | Still open after M1; try each sandbox with [setup-mcp.md](setup-mcp.md) |
+| Do agent sandboxes allow a Unix socket or a spawned daemon? | Decides the default local transport | **Claude Code default path: yes** (MCP outside Bash sandbox) — [setup-mcp.md](setup-mcp.md#sandbox-answer-claude-code--proven-default-path). Codex/Copilot when sandboxed: allowlist or pre-start daemon |
 | How does a stdio shim get a per-agent identity? | Attribution and access control | M1 uses env (`HIVEMIND_PRINCIPAL` / `_AGENT` / `_SESSION`); authenticated credentials remain for later |
 | How should writes happen without burdening agents? (agent-authored tool calls versus hooks at session end) | Write quality and token cost (F6) | M2 harness compares the two |
 | Session-level taint: did the agent read untrusted content before writing? | Laundering untrusted text into trusted memory | Design in M3; attack tests in F12 |

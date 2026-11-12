@@ -1,14 +1,18 @@
 # MCP setup: Claude Code, Codex CLI, Copilot CLI
 
-Status: M1 (2026-11-11). Local stdio only. Not a full production deployment
-path: no authentication beyond the local Unix socket; for shared-service
-ops (health, metrics, serve, container) see [operations.md](operations.md).
+Status: 2026-11-12. Local stdio MCP for agents; shared-service ops
+(health, metrics, serve, container, forget SLA) live in
+[operations.md](operations.md).
 
-Aligned with [06 M1 status](06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11):
-compact claim rows (keydir), scope/principal/entity interning, and the
-lexical token-type cap are **landed** in the engine. What remains open is
-re-measuring RSS vs the ≤ 50 MB target (M0 cited 230 MB pre-mitigation) and
-whether each agent sandbox allows a Unix socket or a spawned daemon.
+Engine RSS mitigations (keydir, interning, token-type caps) are **landed**.
+Post-mitigation re-measure: ~207 MB RSS after replaying 100k synthetic
+claims on linux/x86_64 (still above the ≤ 50 MB target) — methodology and
+residual in [06](06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11).
+
+**Proven local path:** Claude Code with its default per-command Bash
+sandbox. Claude Code runs MCP servers **outside** that sandbox, so
+`hivemind mcp` may spawn `hivemindd` and use the store Unix socket without
+extra Seatbelt/bubblewrap rules. See [Claude Code](#claude-code) below.
 
 hivemind exposes memory to coding agents as an MCP server. The agent talks
 stdio MCP to `hivemind mcp`; that shim finds or starts `hivemindd`, which owns
@@ -34,14 +38,22 @@ Put both binaries on `PATH`, or keep them as siblings under
 `target/release/` (the MCP shim looks for `hivemindd` next to itself, then
 on `PATH`).
 
-Optional smoke check without an agent:
+Optional smoke check without an agent (same remember → recall → show path
+the MCP tools use; CLI talks to the daemon socket when present):
 
 ```bash
-export HIVEMIND_DIR="$HOME/.hivemind/store"
+export HIVEMIND_DIR="${HIVEMIND_DIR:-$HOME/.hivemind/smoke}"
+rm -rf "$HIVEMIND_DIR"
 ./target/release/hivemind init
-./target/release/hivemindd --dir "$HIVEMIND_DIR" &   # or let `hivemind mcp` spawn it
-./target/release/hivemind --dir "$HIVEMIND_DIR" remember \
-  "MCP setup smoke test" --kind fact --scope project:local/smoke
+./target/release/hivemindd &   # or let `hivemind mcp` spawn it
+./target/release/hivemind remember \
+  --kind fact --scope project:local/smoke \
+  "MCP setup smoke: OPENSSL_DIR brew openssl@3 on arm64"
+./target/release/hivemind recall \
+  --scope project:local/smoke \
+  "OPENSSL_DIR brew openssl"
+# copy the claim id from the recall card, then:
+./target/release/hivemind show clm_<id-prefix>
 ```
 
 ## Process model
@@ -81,11 +93,16 @@ Order is fixed (prompt-cache friendly):
    `min_offset` from a prior write for read-your-writes.
 3. `show` — full claim (provenance, belief, links) by id or unique prefix.
 4. `retract` — mark wrong / misrecorded / duplicate.
-5. `feedback` — helpful / unhelpful / harmful / not_applicable.
-6. `changes_since` — events at/after log offset `from` (change feed).
+5. `forget` — privacy erasure (rewrites history); require a reason. Prefer
+   `retract` for wrong knowledge — see
+   [operations.md](operations.md#erasure--forget-privacy-sla).
+6. `feedback` — helpful / unhelpful / harmful / not_applicable.
+7. `promote` — raise trust by superseding; refuses untrusted / agent-only
+   tiers (quarantined recall is never instructions).
+8. `changes_since` — events at/after log offset `from` (change feed).
 
-`invalidate`, `link`, `put`, and `cat` remain CLI/daemon methods; they are
-not MCP tools in M1.
+Untrusted recall/show text is wrapped in quarantine markers. `invalidate`,
+`link`, `put`, and `cat` remain CLI/daemon methods; they are not MCP tools.
 
 ## Claude Code
 
@@ -123,10 +140,44 @@ claude mcp add --transport stdio --scope user \
 User-scoped entries live under `~/.claude.json`. Confirm with
 `claude mcp list`.
 
-**Sandbox note [?]:** if the Claude Code sandbox blocks Unix sockets or
-spawning `hivemindd`, run the daemon outside the sandbox first and point
-`HIVEMIND_DIR` at a store whose socket the shim can still reach. This is an
-open M1 question in [06](06-prototype-plan.md#open-questions).
+### Sandbox answer (Claude Code) — proven default path
+
+Claude Code’s **built-in Bash sandbox covers shell commands only**. MCP
+servers, hooks, and similar helper processes run **outside** that sandbox
+with the user’s normal privileges
+([Configure the sandboxed Bash tool](https://code.claude.com/docs/en/sandboxing),
+checked 2026-11-12). Therefore the default local wiring works:
+
+1. Claude Code starts `hivemind mcp` as an MCP stdio server (unsandboxed).
+2. The shim creates or connects to `<HIVEMIND_DIR>/run/hivemindd.sock`.
+3. If the socket is missing, the shim **spawns `hivemindd`** as a sibling
+   process (also outside the Bash sandbox).
+4. Tool calls `remember` → `recall` → `show` use that daemon.
+
+No `allowUnixSockets` / `allowAllUnixSockets` entry is required for this
+default path. Bash tools inside the sandbox still cannot bind arbitrary
+Unix sockets unless you widen sandbox settings; that does **not** block
+the MCP server itself.
+
+**When this answer does not apply:** if you wrap the **entire** Claude Code
+process in `@anthropic-ai/sandbox-runtime` (or another full-session
+sandbox), MCP is inside the boundary too. Then either (a) pre-start
+`hivemindd` on the host and allowlist connect to
+`$HIVEMIND_DIR/run/hivemindd.sock`, or (b) grant the runtime permission to
+spawn `hivemindd` and bind that socket path. Prefer a path allowlist over
+`allowAllUnixSockets: true` (the latter opens SSH/Docker sockets).
+
+### Smoke from Claude Code
+
+After `claude mcp list` shows `hivemind` and its tools:
+
+1. `remember` — statement
+   `Claude Code MCP smoke: OPENSSL_DIR brew openssl@3 on arm64`, kind
+   `fact`, scope `project:local/claude-smoke`.
+2. `recall` — query `OPENSSL_DIR brew openssl`, optionally pass the
+   returned `offset` as `min_offset`.
+3. `show` — the claim id (or unique prefix) from step 1/2.
+4. Optional: `changes_since` with `from: 0` and confirm the remember event.
 
 ## Codex CLI
 
@@ -157,6 +208,13 @@ codex mcp list
 
 Raise `startup_timeout_sec` if cold start (daemon spawn + store open) exceeds
 the default on a large store.
+
+**Sandbox note:** Codex’s macOS Seatbelt path can deny `AF_UNIX` connect
+unless you allowlist the daemon socket (Codex ≥ 0.121.0
+`permissions.*.network.unix_sockets`) or pre-start `hivemindd` outside the
+sandbox. Stdio MCP itself is still how Codex launches `hivemind mcp`; the
+shim then needs socket access to talk to the daemon. Prefer the
+[Claude Code](#claude-code) path when you need a proven default.
 
 ## GitHub Copilot CLI
 
@@ -192,15 +250,18 @@ copilot mcp add hivemind \
 copilot mcp list
 ```
 
-In an interactive session, `/mcp add` walks the same fields. Local stdio
-servers started inside Copilot's sandbox show as sandboxed in
-`copilot mcp list`; if the socket or daemon spawn fails there, start
-`hivemindd` outside the sandbox first (same open question as above).
+In an interactive session, `/mcp add` walks the same fields. Local sandboxing
+is **off by default**; when enabled (`/sandbox enable`), local MCP servers
+run inside the sandbox by default. If daemon spawn or the Unix socket fails
+there, either disable sandboxing for MCP subprocesses or start `hivemindd`
+outside the sandbox and grant the store path. Prefer the
+[Claude Code](#claude-code) path when you need a proven default.
 
 ## Verify from an agent
 
 Once the client lists the `hivemind` server and its tools (`remember`,
-`recall`, `show`, `retract`, `forget`, `feedback`, `changes_since`):
+`recall`, `show`, `retract`, `forget`, `feedback`, `promote`,
+`changes_since`):
 
 1. Call `remember` with a short statement, a `kind`, and a `scope` such as
    `project:github.com/you/repo`.

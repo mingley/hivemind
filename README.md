@@ -19,8 +19,9 @@ into a shared service.
 > additive `/readyz` `/metrics`, JSON logging via env, and a minimal
 > Dockerfile — see [docs/operations.md](docs/operations.md). Local agents
 > still use `hivemind mcp` → `hivemindd`; remote/team use `hivemind serve`.
-> The product is **not** fully production-ready yet (no HA, RSS vs 50 MB
-> target not re-claimed, sandbox compatibility unproven). Local MCP setup:
+> Residual risks: no HA; post-mitigation RSS at 100k synthetic claims is
+> ~207 MB (above the ≤ 50 MB target — see measurements below). **Local MCP
+> path proven for Claude Code** (MCP runs outside its Bash sandbox):
 > [docs/setup-mcp.md](docs/setup-mcp.md).
 
 ## What makes it different
@@ -90,20 +91,32 @@ Other commands: `retract`, `invalidate`, `link`, `feedback`, `put`, `cat`,
 
 ## Status and measurements
 
-M0 measurements, from the engine benchmark (Apple M4 Pro, 100k synthetic
-claims):
+M0 latency (Apple M4 Pro, 100k synthetic claims) still holds as the
+published latency baseline. **RSS was re-measured** after keydir / interning /
+token-type caps (2026-11-12, linux/x86_64 Xeon cloud agent, release, no
+embedder) with
+`cargo run --release -p hivemind-engine --example rss_harness -- <N>`
+(same generator seed as `examples/bench`; RSS = `ps -o rss=` for that PID):
 
 | Metric | Result |
 |---|---|
-| Recall within one scope | p95 1.0 ms |
-| Recall across all scopes | p95 4.8 ms |
-| Write acknowledged after `F_FULLFSYNC` | p95 8.9 ms |
-| Replay on open | 0.8 s |
-| RSS after replay | 230 MB pre-mitigation; keydir/interning/token caps landed in M1 — re-measure before claiming ≤ 50 MB |
+| Recall within one scope (M0, M4 Pro) | p95 1.0 ms |
+| Recall across all scopes (M0, M4 Pro) | p95 4.8 ms |
+| Write acknowledged after `F_FULLFSYNC` (M0, M4 Pro) | p95 8.9 ms |
+| Replay on open (M0 / post-mitigation linux) | 0.8 s / ~1.9 s |
+| RSS after replay, 100k claims | **~207 MB** post-mitigation (M0 pre-mitigation 230 MB on M4 Pro) — ≤ 50 MB ❌ |
+| RSS after replay, 10k claims | **~30 MB** (under the 50 MB line at this size) |
 
-Details, follow-ups, and milestones are in
-[06](docs/06-prototype-plan.md#m0-status-engine-core-done-2026-11-10) and
-[M1 status](docs/06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11).
+**Residual:** in-memory BM25 dictionary (hits the 250k term cap on this
+synthetic vocab) plus keydir rows (statement caches, applicability maps).
+`Store::seal_lexical` writes a segment file but today’s
+`LexicalSegment::open` copies into an anonymous map and does not free the
+live heap, so sealing is **not** an RSS win yet. Cheap operator knob:
+lower `Options.max_terms` for adversarial vocab; next real cut needs
+file-backed mmap search that drops live postings (or a denser keydir).
+
+Details: [06](docs/06-prototype-plan.md#m0-status-engine-core-done-2026-11-10)
+and [M1 status](docs/06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11).
 
 Every change runs `cargo fmt --check`, `cargo clippy --all-targets -- -D
 warnings`, and `cargo test`. The test suite includes a `kill -9` crash loop
