@@ -171,21 +171,24 @@ change until then):
 - **RSS mitigations landed** (keydir + on-demand log load for show; interning
   of scopes / principals / entity keys; lexical token-type cap, default
   250k). **Re-measured** with
-  `cargo run --release -p hivemind-engine --example rss_harness` (same seed
+  `cargo run --release -p hivemind-engine --example rss_harness -- 10000 100000`
+  (multi-N / `--dir` / `--progress`; or `./scripts/rss_scale_1m.sh`; same seed
   as `examples/bench`; RSS via `ps -o rss=` on the harness PID):
 
-  | Host | N claims | Terms | RSS after replay | vs ≤ 50 MB |
-  |---|---|---|---|---|
-  | M0 Apple M4 Pro (pre-mitigation) | 100k | ~207k | 230 MB | ❌ |
-  | linux/x86_64 (post-mitigation, 2026-11-12) | 100k | 250k (cap) | **~207 MB** | ❌ |
-  | linux/x86_64 (post-mitigation) | 10k | ~46k | **~30 MB** | ✅ at this size |
+  | Host | N claims | Terms | Replay | RSS after replay | vs ≤ 50 MB |
+  |---|---|---|---|---|---|
+  | M0 Apple M4 Pro (pre-mitigation) | 100k | ~207k | — | 230 MB | ❌ |
+  | linux/x86_64 (post-mitigation, 2026-11-12 mid-scale) | 100k | 250k (cap) | ~2.0 s | **~219 MB** | ❌ |
+  | linux/x86_64 (post-mitigation, mid-scale) | 10k | ~46k | ~0.18 s | **~30 MB** | ✅ at this size |
 
   **Residual:** BM25 dictionary/postings under a large synthetic vocab, plus
   keydir statement caches. `seal_lexical` does not cut RSS yet
   (`LexicalSegment::open` anon-copies and the live index stays). Further
   cheap knobs: lower `Options.max_terms`; real coding corpora share far more
   tokens than the synthetic bench. Next structural cut: search sealed
-  file-backed segments and drop live postings.
+  file-backed segments and drop live postings. **1M** remains optional via
+  `HIVEMIND_RSS_TRY_1M=1` when MemAvailable ≥ 4 GiB; mid-scale (10k+100k) is
+  the landed proof point.
 - **Sandbox (Claude Code answered):** default Claude Code Bash sandbox does
   **not** cover MCP servers, so `hivemind mcp` → spawn `hivemindd` + Unix
   socket works without extra allowlists. Codex / Copilot CLI when sandboxed

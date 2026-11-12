@@ -347,7 +347,8 @@ Ops packaging (CI gates, release artifacts, `/health` plus `/readyz` `/metrics`,
 structured logs, Dockerfile) has landed. **Local MCP:** Claude Code’s default
 Bash sandbox leaves MCP outside the boundary — proven wiring and
 remember→recall→show smoke live in [setup-mcp.md](setup-mcp.md). Footprint:
-post-mitigation RSS at 100k synthetic claims is still ~207 MB (≤ 50 MB miss);
+post-mitigation RSS at 100k synthetic claims is still ~219 MB (≤ 50 MB miss;
+10k ~30 MB pass; `./scripts/rss_scale_1m.sh`);
 see [README](../README.md#status-and-measurements) /
 [06](06-build-plan.md). Erasure (`forget`) and its online SLA are documented
 above; backup retention remains an operator policy. Full residual-risk table:

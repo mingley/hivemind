@@ -95,18 +95,19 @@ Other commands: `retract`, `invalidate`, `link`, `feedback`, `put`, `cat`,
 
 M0 latency (Apple M4 Pro, 100k synthetic claims) still holds as the
 published latency baseline. **RSS was re-measured** after keydir / interning /
-token-type caps (2026-11-12, linux/x86_64 Xeon cloud agent, release, no
-embedder) with
-`cargo run --release -p hivemind-engine --example rss_harness -- <N>`
-(same generator seed as `examples/bench`; RSS = `ps -o rss=` for that PID):
+token-type caps (2026-11-12, linux/x86_64 cloud agent, release, no embedder)
+with multi-N
+`cargo run --release -p hivemind-engine --example rss_harness -- 10000 100000`
+(or `./scripts/rss_scale_1m.sh`; same generator seed as `examples/bench`;
+RSS = `ps -o rss=` for that PID):
 
 | Metric | Result |
 |---|---|
 | Recall within one scope (M0, M4 Pro) | p95 1.0 ms |
 | Recall across all scopes (M0, M4 Pro) | p95 4.8 ms |
 | Write acknowledged after `F_FULLFSYNC` (M0, M4 Pro) | p95 8.9 ms |
-| Replay on open (M0 / post-mitigation linux) | 0.8 s / ~1.9 s |
-| RSS after replay, 100k claims | **~207 MB** post-mitigation (M0 pre-mitigation 230 MB on M4 Pro) — ≤ 50 MB ❌ |
+| Replay on open (10k / 100k, linux mid-scale) | ~0.18 s / ~2.0 s |
+| RSS after replay, 100k claims | **~219 MB** post-mitigation (M0 pre-mitigation 230 MB on M4 Pro) — ≤ 50 MB ❌ |
 | RSS after replay, 10k claims | **~30 MB** (under the 50 MB line at this size) |
 
 **Residual:** in-memory BM25 dictionary (hits the 250k term cap on this
@@ -132,7 +133,7 @@ Honest gaps — none of these are presented as “fully production certified”:
 |---|---|
 | **Multi-node HA** | Explicit NON-goal. One node + restore from shipped segment backups ([operations.md](docs/operations.md)). No leader election / multi-region active-active. |
 | **IdP / DCR** | Shared OAuth 2.1 AS is in-process (PKCE + client_credentials + refresh_token + RFC 7591 DCR, short access TTL, separated secrets). DCR clients persist under `{HIVEMIND_ROOT}/oauth/dcr_clients.json`; refresh handles under `{HIVEMIND_ROOT}/oauth/refresh_tokens.json`. External IdP federation remains **P1**. |
-| **Footprint at 100k** | Post-mitigation RSS ~**207 MB** vs ≤ **50 MB** target (10k ~30 MB). 1M-scale RSS/replay budgets unproven. |
+| **Footprint at 100k** | Post-mitigation RSS ~**219 MB** vs ≤ **50 MB** target (10k ~30 MB). Mid-scale harness/script landed; 1M-scale RSS/replay budgets still unproven. |
 | **Embeddings default** | **Lexical-only** remains the lean default (F4): no embedder required for remember/recall. Optional Model2Vec via `--features embeddings` + `--embedder model2vec` ([operations.md](docs/operations.md#embeddings-optional-lean-default-is-lexical-only)); hybrid ≥10% win not evidenced in-repo. |
 | **F1–F12 research** | Mechanisms for trust, citations, hybrid recall, etc. ship; outcome / attack-efficacy measurements (F1–F12) remain open research, not ship blockers. |
 | **LazyFS CI** | Frame goldens, property tests, and 12× `kill -9` run in CI; **LazyFS** power-loss injection is **not** wired into CI ([f13-crash-injection.md](docs/f13-crash-injection.md)). |

@@ -9,10 +9,11 @@ IdP, RSS, F1–F12, LazyFS CI, LICENSE) live in the
 see [operations.md](operations.md) and [SECURITY.md](../SECURITY.md).
 
 Engine RSS mitigations (keydir, interning, token-type caps) are **landed**.
-Post-mitigation re-measure: ~207 MB RSS after replaying 100k synthetic
-claims on linux/x86_64 (still above the ≤ 50 MB target) — methodology and
-residual in
-[06](06-build-plan.md#m1-status-daemon-and-mcp-done-2026-11-11).
+Post-mitigation mid-scale re-measure: ~30 MB @ 10k / ~219 MB @ 100k
+synthetic claims on linux/x86_64 (100k still above the ≤ 50 MB target) —
+methodology and residual in
+[06](06-build-plan.md#m1-status-daemon-and-mcp-done-2026-11-11)
+(`./scripts/rss_scale_1m.sh`).
 
 **Proven local path:** Claude Code with its default per-command Bash
 sandbox. Claude Code runs MCP servers **outside** that sandbox, so
