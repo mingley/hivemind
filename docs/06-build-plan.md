@@ -1,9 +1,18 @@
 # 06: Build plan, milestones, and open questions
 
-Status: v0.9 (2026-11-11). M0–M6 are done. Written after the
-build decision ([04](04-architecture-and-decisions.md#decision-summary)). Each
-milestone ends with something usable, a test or benchmark that would expose
-failure, and an explicit list of what it does **not** prove.
+> **Historical build plan** (not current product status). This page records the
+> M0–M6 milestone plan written during early construction, what each milestone
+> shipped, and what it deliberately did **not** prove. hivemind is no longer
+> framed as a “prototype” or “v0-only” product — for today’s status, measured
+> RSS, MCP path, and **residual risks**, see the
+> [README](../README.md#status-and-measurements) and
+> [Residual risks](../README.md#residual-risks).
+
+Status: historical (milestones M0–M6 done 2026-11-11; RSS/MCP notes updated
+2026-11-12). Written after the build decision
+([04](04-architecture-and-decisions.md#decision-summary)). Each milestone ends
+with something usable, a test or benchmark that would expose failure, and an
+explicit list of what it does **not** prove.
 
 ## Smallest useful implementation
 

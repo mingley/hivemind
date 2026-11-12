@@ -1,7 +1,7 @@
 # M6 implementation notes (engine growth)
 
 Contract snapshot for the M6 deliverables in
-[06](06-prototype-plan.md#m6-status-engine-growth-done-2026-11-11).
+[06](06-build-plan.md#m6-status-engine-growth-done-2026-11-11).
 
 ## Snapshots
 

@@ -1,7 +1,7 @@
 # M4 implementation notes
 
 Status: **implemented** (2026-11-11). Milestone **M4 Retrieval depth** from
-[06](06-prototype-plan.md), mechanisms from [08](08-hippocampal-design.md).
+[06](06-build-plan.md), mechanisms from [08](08-hippocampal-design.md).
 
 ## Delivered
 

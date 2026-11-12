@@ -1,7 +1,7 @@
 # M2 implementation notes (working)
 
 Status: **implemented** (2026-11-11). Milestone **M2 Evaluation harness** from
-[06](06-prototype-plan.md), using the scenario shape in
+[06](06-build-plan.md), using the scenario shape in
 [05](05-evaluation-plan.md) and the twelve seeds in
 [research/04 §9](../research/04-coding-agent-memory-practice.md#9-evaluation-seed-scenarios).
 
@@ -15,7 +15,7 @@ Status: **implemented** (2026-11-11). Milestone **M2 Evaluation harness** from
    (lexical-only / store BM25 as stand-in), oracle (gold inject).
 5. CLI: `hivebench er` (offline retrieval), `hivebench list`, `hivebench
    validate`.
-6. Update [06](06-prototype-plan.md) with an M2 status section when landed.
+6. Update [06](06-build-plan.md) with an M2 status section when landed.
 
 ## Scenario directory contract
 

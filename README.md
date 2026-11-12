@@ -10,19 +10,20 @@ and tokens**, with enough provenance that agents can verify what they
 retrieve. It runs as a lean local daemon on a laptop and is designed to grow
 into a shared service.
 
-> **Status (2026-11-12):** research done; M0–M6 are built and tested (engine,
-> daemon/MCP, `hivebench`, citations/leases/import-export, hybrid retrieval,
-> shared HTTP + MCP Streamable HTTP + OAuth 2.1 + gRPC, tenant partitions,
-> sync queue/cursor, segment backup, projection snapshots, mmap lexical
-> segments, LSH ANN, deterministic sim). **Ops surfaces landed:** CI installs
-> `protoc` then fmt/clippy/tests, Linux release artifacts, `/health` plus
-> additive `/readyz` `/metrics`, JSON logging via env, and a minimal
-> Dockerfile — see [docs/operations.md](docs/operations.md). Local agents
-> still use `hivemind mcp` → `hivemindd`; remote/team use `hivemind serve`.
-> Residual risks: no HA; post-mitigation RSS at 100k synthetic claims is
-> ~207 MB (above the ≤ 50 MB target — see measurements below). **Local MCP
-> path proven for Claude Code** (MCP runs outside its Bash sandbox):
-> [docs/setup-mcp.md](docs/setup-mcp.md).
+> **Status (2026-11-12):** M0–M6 are built and tested (engine, daemon/MCP,
+> `hivebench`, citations/leases/import-export, hybrid retrieval, shared HTTP +
+> MCP Streamable HTTP + OAuth 2.1 + gRPC, tenant partitions, sync queue/cursor,
+> segment backup, projection snapshots, mmap lexical segments, LSH ANN,
+> deterministic sim). **Ops surfaces landed:** CI installs `protoc` then
+> fmt/clippy/tests, Linux release artifacts, `/health` plus additive `/readyz`
+> `/metrics`, JSON logging via env, and a minimal Dockerfile — see
+> [docs/operations.md](docs/operations.md) and [SECURITY.md](SECURITY.md).
+> Local agents use `hivemind mcp` → `hivemindd`; remote/team use
+> `hivemind serve`. **Local MCP path proven for Claude Code** (MCP runs
+> outside its Bash sandbox): [docs/setup-mcp.md](docs/setup-mcp.md). This is
+> shared-memory software suitable for real multi-agent / team use on a single
+> node — **not** a claim of multi-node HA, legal certification, or closed
+> outcome-eval science. See [Residual risks](#residual-risks).
 
 ## What makes it different
 
@@ -53,7 +54,7 @@ into a shared service.
 | 03 | [Memory model](docs/03-memory-model.md) | Logical model, lifecycle operations, trust, scopes, retrieval contract, six worked coding-agent examples |
 | 04 | [Architecture and decisions](docs/04-architecture-and-decisions.md) | Decision record, engine design, durability contract, staged path to distribution, risks |
 | 05 | [Evaluation plan](docs/05-evaluation-plan.md) | Memory quality, system performance, and cost per successful task, measured together against fair baselines |
-| 06 | [Build plan](docs/06-prototype-plan.md) | Milestones, what each proves and doesn't, open questions |
+| 06 | [Build plan](docs/06-build-plan.md) | Historical M0–M6 milestones, what each proved / didn't, open questions |
 | 07 | [Falsification experiments](docs/07-falsification-experiments.md) | Prioritized experiments that could overturn design bets early |
 | 08 | [Hippocampal design](docs/08-hippocampal-design.md) | Which ideas from hippocampal research become mechanisms, and how each is tested |
 | — | [MCP setup](docs/setup-mcp.md) | Build `hivemind` / `hivemindd`, configure Claude Code, Codex CLI, and Copilot CLI |
@@ -115,12 +116,28 @@ live heap, so sealing is **not** an RSS win yet. Cheap operator knob:
 lower `Options.max_terms` for adversarial vocab; next real cut needs
 file-backed mmap search that drops live postings (or a denser keydir).
 
-Details: [06](docs/06-prototype-plan.md#m0-status-engine-core-done-2026-11-10)
-and [M1 status](docs/06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11).
+Details: [06](docs/06-build-plan.md#m0-status-engine-core-done-2026-11-10)
+and [M1 status](docs/06-build-plan.md#m1-status-daemon-and-mcp-done-2026-11-11).
 
 Every change runs `cargo fmt --check`, `cargo clippy --all-targets -- -D
 warnings`, and `cargo test`. The test suite includes a `kill -9` crash loop
 that checks every acknowledged write survives.
+
+## Residual risks
+
+Honest gaps — none of these are presented as “fully production certified”:
+
+| Risk | Status |
+|---|---|
+| **Multi-node HA** | Explicit NON-goal. One node + restore from shipped segment backups ([operations.md](docs/operations.md)). No leader election / multi-region active-active. |
+| **IdP / DCR / refresh** | Shared OAuth 2.1 AS is in-process (PKCE + client_credentials, short TTL, separated secrets). External IdP federation, dynamic client registration, and refresh tokens are **P1**. |
+| **Footprint at 100k** | Post-mitigation RSS ~**207 MB** vs ≤ **50 MB** target (10k ~30 MB). 1M-scale RSS/replay budgets unproven. |
+| **F1–F12 research** | Mechanisms for trust, citations, hybrid recall, etc. ship; outcome / attack-efficacy measurements (F1–F12) remain open research, not ship blockers. |
+| **LazyFS CI** | Frame goldens, property tests, and 12× `kill -9` run in CI; **LazyFS** power-loss injection is **not** wired into CI ([f13-crash-injection.md](docs/f13-crash-injection.md)). |
+| **LICENSE** | Repository `LICENSE` file is **pending** owner choice (blocked before a tagged “production” release claim). |
+
+Threat model and secure defaults: [SECURITY.md](SECURITY.md). Operator runbook:
+[docs/operations.md](docs/operations.md).
 
 ## Layout
 

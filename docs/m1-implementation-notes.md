@@ -1,10 +1,10 @@
 # M1 implementation notes (historical)
 
 Status: **implemented / historical** (2026-11-11). Milestone **M1 Daemon and
-MCP** from [06](06-prototype-plan.md) is done for the daemon, MCP shim, change
+MCP** from [06](06-build-plan.md) is done for the daemon, MCP shim, change
 feed, setup docs, and token-type caps. Keep this file as the contract snapshot
 used while the work was split across crates; prefer
-[06](06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11) and
+[06](06-build-plan.md#m1-status-daemon-and-mcp-done-2026-11-11) and
 [setup-mcp.md](setup-mcp.md) for current status and operator docs.
 
 Items below that were **not** finished in M1 are marked *deferred*.
@@ -19,7 +19,7 @@ Items below that were **not** finished in M1 are marked *deferred*.
    names use `Arc<str>`. Compact claim rows / full interning *Deferred*.
 6. Setup docs for Claude Code, Codex, and Copilot CLI. **Done**
    ([setup-mcp.md](setup-mcp.md)).
-7. Update README and [06](06-prototype-plan.md) when M1 lands. **Done.**
+7. Update README and [06](06-build-plan.md) when M1 lands. **Done.**
 
 ## Process model
 

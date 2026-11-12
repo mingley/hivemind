@@ -30,9 +30,12 @@ what it should look like, and how much of it already exists.
 
 ## Objective
 
-Determine whether we can build a Rust-native memory system that lets multiple
-agents preserve, share, update, and retrieve useful knowledge across sessions,
-projects, and machines. The deployment range is:
+Build and operate a Rust-native memory system that lets multiple agents
+preserve, share, update, and retrieve useful knowledge across sessions,
+projects, and machines. The software for local daemon, MCP, and shared-service
+paths is in tree (see [README](../README.md)); open work is measurement,
+hardening, and residual risks — not “is a prototype build possible.” The
+deployment range is:
 
 - **Local:** light enough to run on a developer's machine.
 - **Shared:** usable as a remote service by many agents.

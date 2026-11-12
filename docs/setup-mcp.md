@@ -2,12 +2,15 @@
 
 Status: 2026-11-12. Local stdio MCP for agents; shared-service ops
 (health, metrics, serve, container, forget SLA) live in
-[operations.md](operations.md).
+[operations.md](operations.md). Product status and residual risks (HA, IdP/DCR,
+RSS, F1–F12, LazyFS CI, LICENSE) live in the
+[README](../README.md#residual-risks).
 
 Engine RSS mitigations (keydir, interning, token-type caps) are **landed**.
 Post-mitigation re-measure: ~207 MB RSS after replaying 100k synthetic
 claims on linux/x86_64 (still above the ≤ 50 MB target) — methodology and
-residual in [06](06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11).
+residual in
+[06](06-build-plan.md#m1-status-daemon-and-mcp-done-2026-11-11).
 
 **Proven local path:** Claude Code with its default per-command Bash
 sandbox. Claude Code runs MCP servers **outside** that sandbox, so

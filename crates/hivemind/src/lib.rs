@@ -1,6 +1,6 @@
 //! Library surface for the `hivemind` CLI, daemon, and MCP shim.
 //!
-//! M1 process model (`docs/06-prototype-plan.md`, `docs/m1-implementation-notes.md`):
+//! M1 process model (`docs/06-build-plan.md`, `docs/m1-implementation-notes.md`):
 //! - [`daemon`] owns a store and serves a Unix-socket protocol
 //! - [`mcp`] is a stdio MCP shim that finds or starts the daemon
 //! - [`client`] talks to the daemon; [`service`] handles requests against a [`hivemind_engine::Store`]

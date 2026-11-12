@@ -2,8 +2,10 @@
 
 Operator guide for running hivemind as a local daemon or shared HTTP/gRPC
 service. **Ops surfaces** (health probes, metrics, release packaging, container
-image) are in place; this is not a claim of full product production-readiness
-(no HA, no multi-region, sandbox limits still apply for local MCP).
+image) are in place. For product-level residual risks (HA, IdP/DCR, RSS,
+F1–F12, LazyFS CI, LICENSE), see the
+[README residual risks](../README.md#residual-risks) — this runbook does not
+claim multi-node HA or legal certification.
 
 ## Modes
 
@@ -235,12 +237,12 @@ hivemind verify                                          # should stay clean aft
 ## Status framing
 
 Ops packaging (CI gates, release artifacts, `/health` plus `/readyz` `/metrics`,
-structured logs, Dockerfile) has landed. Product gaps that remain out of scope
-for this doc: HA, and authenticated multi-tenant isolation hardening beyond
-bearer OAuth. **Local MCP:** Claude Code’s default Bash sandbox leaves MCP
-outside the boundary — proven wiring and remember→recall→show smoke live in
-[setup-mcp.md](setup-mcp.md). Footprint: post-mitigation RSS at 100k
-synthetic claims is still ~207 MB (≤ 50 MB miss); see README / [06](06-prototype-plan.md).
-Erasure (`forget`) and its online SLA are documented above; backup retention
-remains an operator policy.
+structured logs, Dockerfile) has landed. **Local MCP:** Claude Code’s default
+Bash sandbox leaves MCP outside the boundary — proven wiring and
+remember→recall→show smoke live in [setup-mcp.md](setup-mcp.md). Footprint:
+post-mitigation RSS at 100k synthetic claims is still ~207 MB (≤ 50 MB miss);
+see [README](../README.md#status-and-measurements) /
+[06](06-build-plan.md). Erasure (`forget`) and its online SLA are documented
+above; backup retention remains an operator policy. Full residual-risk table:
+[README](../README.md#residual-risks).
 

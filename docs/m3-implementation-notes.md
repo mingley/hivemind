@@ -1,7 +1,7 @@
 # M3 implementation notes
 
 Status: **implemented** (2026-11-11). Milestone **M3 Coding-agent semantics**
-from [06](06-prototype-plan.md).
+from [06](06-build-plan.md).
 
 ## Delivered
 
