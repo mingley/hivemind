@@ -79,6 +79,8 @@ pub struct ServeArgs {
     pub register_rate_per_minute: u64,
     /// Sustained authenticated RPC requests per minute per IP+principal (`0` = off).
     pub rpc_rate_per_minute: u64,
+    /// Durable DCR client registry JSON. Default: `{root}/oauth/dcr_clients.json`.
+    pub oauth_clients_path: Option<PathBuf>,
 }
 
 struct AppState {
@@ -104,15 +106,22 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     let issuer = issuer.trim_end_matches('/').to_owned();
     validate_transport(args.require_tls, &issuer)?;
 
-    let oauth = OAuthState::new(OAuthConfig {
-        issuer: issuer.clone(),
-        client_id: args.oauth_client_id.clone(),
-        client_secret: args.oauth_client_secret.clone(),
-        signing_key: args.signing_key.clone(),
-        resource: format!("{issuer}/mcp"),
-        access_token_ttl_secs: args.access_token_ttl_secs,
-        refresh_token_ttl_secs: args.refresh_token_ttl_secs,
-    });
+    let clients_path = args
+        .oauth_clients_path
+        .clone()
+        .unwrap_or_else(|| oauth::default_clients_path(&args.root));
+    let oauth = OAuthState::with_clients_path(
+        OAuthConfig {
+            issuer: issuer.clone(),
+            client_id: args.oauth_client_id.clone(),
+            client_secret: args.oauth_client_secret.clone(),
+            signing_key: args.signing_key.clone(),
+            resource: format!("{issuer}/mcp"),
+            access_token_ttl_secs: args.access_token_ttl_secs,
+            refresh_token_ttl_secs: args.refresh_token_ttl_secs,
+        },
+        Some(clients_path.clone()),
+    )?;
 
     let limiter = Arc::new(RateLimiter::new(RateLimitConfig {
         token_per_minute: args.token_rate_per_minute,
@@ -231,6 +240,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         root = %args.root.display(),
         tenant = %args.default_tenant,
         issuer = %issuer,
+        oauth_clients = %clients_path.display(),
         require_tls = args.require_tls,
         token_rate_per_minute = args.token_rate_per_minute,
         register_rate_per_minute = args.register_rate_per_minute,

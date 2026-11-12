@@ -130,7 +130,7 @@ Honest gaps — none of these are presented as “fully production certified”:
 | Risk | Status |
 |---|---|
 | **Multi-node HA** | Explicit NON-goal. One node + restore from shipped segment backups ([operations.md](docs/operations.md)). No leader election / multi-region active-active. |
-| **IdP / DCR** | Shared OAuth 2.1 AS is in-process (PKCE + client_credentials + refresh_token + RFC 7591 DCR, short access TTL, separated secrets). DCR clients are in-memory (restart clears). External IdP federation remains **P1**. |
+| **IdP / DCR** | Shared OAuth 2.1 AS is in-process (PKCE + client_credentials + refresh_token + RFC 7591 DCR, short access TTL, separated secrets). DCR clients persist under `{HIVEMIND_ROOT}/oauth/dcr_clients.json`; refresh handles remain in-memory. External IdP federation remains **P1**. |
 | **Footprint at 100k** | Post-mitigation RSS ~**207 MB** vs ≤ **50 MB** target (10k ~30 MB). 1M-scale RSS/replay budgets unproven. |
 | **F1–F12 research** | Mechanisms for trust, citations, hybrid recall, etc. ship; outcome / attack-efficacy measurements (F1–F12) remain open research, not ship blockers. |
 | **LazyFS CI** | Frame goldens, property tests, and 12× `kill -9` run in CI; **LazyFS** power-loss injection is **not** wired into CI ([f13-crash-injection.md](docs/f13-crash-injection.md)). |

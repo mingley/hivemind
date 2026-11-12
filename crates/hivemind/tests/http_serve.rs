@@ -26,6 +26,7 @@ fn test_args(root: std::path::PathBuf, addr: SocketAddr) -> ServeArgs {
         token_rate_per_minute: hivemind::ratelimit::DEFAULT_TOKEN_RATE_PER_MINUTE,
         register_rate_per_minute: hivemind::ratelimit::DEFAULT_REGISTER_RATE_PER_MINUTE,
         rpc_rate_per_minute: hivemind::ratelimit::DEFAULT_RPC_RATE_PER_MINUTE,
+        oauth_clients_path: None,
     }
 }
 
@@ -809,6 +810,87 @@ async fn dcr_register_public_authorize_token_refresh() {
     assert_eq!(tenants.status(), 200);
 
     serve.abort();
+}
+
+/// P1: DCR clients survive process restart via `{root}/oauth/dcr_clients.json`.
+#[tokio::test]
+async fn dcr_persists_across_server_restart() {
+    let root = tempdir().unwrap();
+    let clients_path = root.path().join("oauth/dcr_clients.json");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr1 = listener.local_addr().unwrap();
+    drop(listener);
+
+    let args1 = test_args(root.path().to_path_buf(), addr1);
+    let serve1 = tokio::spawn(http::serve(args1));
+    wait_for(addr1).await;
+    let client = reqwest::Client::new();
+
+    let reg = client
+        .post(format!("http://{addr1}/oauth/register"))
+        .json(&json!({
+            "client_name": "persist-across-restart",
+            "token_endpoint_auth_method": "client_secret_basic",
+            "grant_types": ["client_credentials"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reg.status(), 201, "{}", reg.text().await.unwrap());
+    let reg_body: serde_json::Value = reg.json().await.unwrap();
+    let client_id = reg_body["client_id"].as_str().unwrap().to_owned();
+    let client_secret = reg_body["client_secret"].as_str().unwrap().to_owned();
+    assert!(
+        clients_path.is_file(),
+        "expected DCR registry at {}",
+        clients_path.display()
+    );
+
+    serve1.abort();
+    // Let the first listener release the port / settle.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener.local_addr().unwrap();
+    drop(listener);
+    let args2 = test_args(root.path().to_path_buf(), addr2);
+    let serve2 = tokio::spawn(http::serve(args2));
+    wait_for(addr2).await;
+
+    let token_resp = client
+        .post(format!("http://{addr2}/oauth/token"))
+        .form(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        token_resp.status(),
+        200,
+        "persisted DCR client should mint tokens after restart: {}",
+        token_resp.text().await.unwrap()
+    );
+    let access = token_resp.json::<serde_json::Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let hello = client
+        .get(format!("http://{addr2}/v1/tenants/default/hello"))
+        .header("Authorization", format!("Bearer {access}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hello.status(), 200, "{}", hello.text().await.unwrap());
+
+    // Configured static confidential client still works on the restarted process.
+    let configured = oauth_access(&client, addr2, "client-secret").await;
+    assert!(!configured.is_empty());
+
+    serve2.abort();
 }
 
 /// P1: excess `/oauth/register` returns 429.

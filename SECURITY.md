@@ -38,8 +38,11 @@ reuse the bootstrap token as the client secret or signing key.
   `token_endpoint_auth_method`, `grant_types`). Prefer
   `client_secret_basic` / `client_secret_post` (issues `client_secret`) or
   `none` (public). Default grants: `authorization_code` + `refresh_token`.
-  Registered clients are **in-memory** (lost on process restart; single-node
-  residual). External IdP federation remains out of scope.
+  Registered clients are persisted under
+  `{HIVEMIND_ROOT}/oauth/dcr_clients.json` (override with
+  `HIVEMIND_OAUTH_CLIENTS_PATH` / `--oauth-clients-path`); the file holds
+  `client_secret` values and should stay mode `0600` on the host. External
+  IdP federation remains out of scope.
 - **Access tokens:** sealed claims (`sub`, `iss`, `exp`, …) with a **short TTL**
   (default 300s, `HIVEMIND_ACCESS_TOKEN_TTL_SECS`).
 - **Refresh tokens:** opaque server-side handles issued on `authorization_code`
@@ -83,11 +86,11 @@ unless you add an external policy layer.
 | Stolen client secret | Can mint access tokens for that client until rotated (configured or DCR). |
 | Stolen signing key | Attacker can forge access tokens; rotate and invalidate by changing the key (existing tokens fail MAC). |
 | Open DCR abuse | Anyone who can reach `/oauth/register` can create clients; rate-limited per IP. Residual: many source IPs / shared NAT; no admin approval step. |
-| DCR client loss on restart | In-memory registry only; process restart drops dynamic clients (and their refresh handles). Re-register after restart. |
+| DCR client store theft | Persisted registry includes client secrets; protect `{HIVEMIND_ROOT}/oauth/` (file written `0600`). Rotate by deleting the entry / re-registering; no in-product rotation API yet. |
 | Principal spoofing on shared RPC | Blocked: token `sub` overwrites request/env actor. |
 | Cross-tenant read/write | Blocked at storage partition; not blocked by per-principal ACL. |
 | Cleartext on the wire | `REQUIRE_TLS` + reverse-proxy contract; residual if operators skip both. |
-| Token replay within TTL | Short access TTL; refresh handles rotate on use (replay of spent refresh fails). In-memory refresh store (process restart invalidates). |
+| Token replay within TTL | Short access TTL; refresh handles rotate on use (replay of spent refresh fails). In-memory refresh store (process restart invalidates refresh handles; DCR clients themselves persist). |
 | Token / RPC / register abuse | Per IP+client / IP / IP+principal rate limits; residual if many source IPs or shared NAT. |
 | Poisoned memory as instructions | Separate trust/quarantine work (P0-C); retrieval is evidence, not instructions. |
 

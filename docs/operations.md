@@ -48,6 +48,7 @@ Daemon, `hivemind serve`, and gRPC all call the same tracing init.
 | `HIVEMIND_DEFAULT_TENANT` | Tenant behind `/mcp` | `default` |
 | `HIVEMIND_PUBLIC_BASE` | Public base URL in OAuth metadata | `http://{listen}` |
 | `HIVEMIND_OAUTH_CLIENT_ID` | Pre-registered confidential client id | `hivemind-cli` |
+| `HIVEMIND_OAUTH_CLIENTS_PATH` | Persisted RFC 7591 DCR client registry JSON | `{HIVEMIND_ROOT}/oauth/dcr_clients.json` |
 | `HIVEMIND_ACCESS_TOKEN_TTL_SECS` | Access-token lifetime (short TTL) | `300` |
 | `HIVEMIND_REFRESH_TOKEN_TTL_SECS` | Refresh-token lifetime (`authorization_code` / `refresh_token`) | `604800` (7d) |
 | `HIVEMIND_TOKEN_RATE_PER_MINUTE` | Sustained `/oauth/token` rate per client IP+`client_id` (`0` disables) | `60` |
@@ -57,8 +58,8 @@ Daemon, `hivemind serve`, and gRPC all call the same tracing init.
 | `HIVEMIND_GRPC_LISTEN` | gRPC listen address | same host as HTTP, port `8788` |
 
 Flags: `--listen` (default `127.0.0.1:8787`), `--no-grpc`, `--token`,
-`--oauth-client-secret`, `--signing-key`, `--access-token-ttl-secs`,
-`--refresh-token-ttl-secs`, `--token-rate-per-minute`,
+`--oauth-client-secret`, `--signing-key`, `--oauth-clients-path`,
+`--access-token-ttl-secs`, `--refresh-token-ttl-secs`, `--token-rate-per-minute`,
 `--register-rate-per-minute`, `--rpc-rate-per-minute`, `--require-tls`,
 `--root`.
 
@@ -80,8 +81,13 @@ rate-limited). Minimal JSON body: `redirect_uris`, `client_name`,
 public MCP clients), `grant_types` (default `authorization_code` +
 `refresh_token`). Response includes `client_id` and `client_secret` when
 confidential. AS metadata advertises `registration_endpoint`. Clients are
-stored **in-process only** (restart clears them — single-node residual). The
-configured `HIVEMIND_OAUTH_CLIENT_ID` / secret remain valid alongside DCR.
+loaded on startup from
+`HIVEMIND_OAUTH_CLIENTS_PATH` (default `{HIVEMIND_ROOT}/oauth/dcr_clients.json`)
+and rewritten atomically (temp + rename) after each successful register so the
+same `client_id` / secret work across process restarts. The file contains
+secrets — keep the data root private. Refresh-token handles stay in-process
+(restart still forces a fresh authorize). The configured
+`HIVEMIND_OAUTH_CLIENT_ID` / secret remain valid alongside DCR.
 
 **TLS:** `hivemind serve` speaks plaintext HTTP/gRPC. Production MUST terminate
 TLS at a reverse proxy (or equivalent), set

@@ -187,6 +187,9 @@ struct ServeArgs {
         env = "HIVEMIND_RPC_RATE_PER_MINUTE"
     )]
     rpc_rate_per_minute: u64,
+    /// Persisted DCR client registry JSON [default: {root}/oauth/dcr_clients.json].
+    #[arg(long, env = "HIVEMIND_OAUTH_CLIENTS_PATH")]
+    oauth_clients_path: Option<PathBuf>,
     /// Skip fsync (tests only).
     #[arg(long, hide = true)]
     no_fsync: bool,
@@ -573,6 +576,7 @@ fn run(cli: Cli) -> Result<()> {
                 token_rate_per_minute: args.token_rate_per_minute,
                 register_rate_per_minute: args.register_rate_per_minute,
                 rpc_rate_per_minute: args.rpc_rate_per_minute,
+                oauth_clients_path: args.oauth_clients_path.clone(),
             }));
         }
         Command::Backup(args) => {

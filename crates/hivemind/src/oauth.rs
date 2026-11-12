@@ -13,14 +13,19 @@
 //! (default 7 days). Bootstrap bearer, OAuth client secret, and signing key are
 //! **separate** secrets — do not reuse the bootstrap token as the HMAC key.
 //!
-//! Dynamically registered clients live in-process (single-node residual: lost on
-//! restart). External IdP federation remains out of scope.
+//! Dynamically registered clients are persisted under the serve data root
+//! (`{HIVEMIND_ROOT}/oauth/dcr_clients.json` by default) so `client_id` /
+//! `client_secret` survive process restart. Refresh-token handles remain
+//! in-process. External IdP federation remains out of scope.
 
 use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -34,6 +39,14 @@ pub const DEFAULT_REFRESH_TOKEN_TTL_SECS: u64 = 604_800; // 7 days
 const CODE_TTL_SECS: u64 = 300;
 /// Principal attributed to the bootstrap/admin bearer on the shared path.
 pub const BOOTSTRAP_PRINCIPAL: &str = "bootstrap";
+/// Relative path under `HIVEMIND_ROOT` for the DCR client registry file.
+pub const DEFAULT_OAUTH_CLIENTS_REL: &str = "oauth/dcr_clients.json";
+const CLIENTS_STORE_VERSION: u32 = 1;
+
+/// Default on-disk path for persisted DCR clients: `{root}/oauth/dcr_clients.json`.
+pub fn default_clients_path(root: &Path) -> PathBuf {
+    root.join(DEFAULT_OAUTH_CLIENTS_REL)
+}
 
 #[derive(Clone, Debug)]
 pub struct OAuthConfig {
@@ -52,18 +65,29 @@ pub struct OAuthConfig {
     pub refresh_token_ttl_secs: u64,
 }
 
-/// In-process registered OAuth client (configured bootstrap or RFC 7591 DCR).
-#[derive(Clone, Debug)]
+/// Registered OAuth client (configured bootstrap or RFC 7591 DCR).
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegisteredClient {
     pub client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_name: Option<String>,
+    #[serde(default)]
     pub redirect_uris: Vec<String>,
     pub token_endpoint_auth_method: String,
     pub grant_types: Vec<String>,
-    /// When true, any redirect_uri is accepted (pre-configured serve client).
+    /// When true, any redirect_uri is accepted (pre-configured serve client only).
+    /// Never persisted as `true` for DCR clients loaded from disk.
+    #[serde(default)]
     pub open_redirect: bool,
     pub issued_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ClientsFile {
+    version: u32,
+    clients: Vec<RegisteredClient>,
 }
 
 impl RegisteredClient {
@@ -102,14 +126,17 @@ pub struct OAuthState {
     pub config: OAuthConfig,
     codes: Arc<Mutex<HashMap<String, AuthCode>>>,
     refresh: Arc<Mutex<HashMap<String, RefreshRecord>>>,
-    /// Dynamically registered clients (in-memory; process-local).
+    /// Dynamically registered clients (loaded from / saved to `clients_path`).
     clients: Arc<Mutex<HashMap<String, RegisteredClient>>>,
+    /// Durable DCR registry path (`None` = in-memory only, tests).
+    clients_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for OAuthState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OAuthState")
             .field("issuer", &self.config.issuer)
+            .field("clients_path", &self.clients_path)
             .finish_non_exhaustive()
     }
 }
@@ -151,13 +178,34 @@ pub struct AuthIdentity {
 }
 
 impl OAuthState {
+    /// In-memory OAuth state (no DCR persistence). Prefer
+    /// [`Self::with_clients_path`] for `hivemind serve`.
     pub fn new(config: OAuthConfig) -> Self {
-        Self {
+        Self::with_clients_path(config, None).expect("in-memory OAuthState cannot fail")
+    }
+
+    /// Build OAuth state, loading persisted DCR clients when `clients_path` is set.
+    ///
+    /// Missing files are treated as an empty registry. Corrupt / unsupported
+    /// files return an error so operators notice instead of silently dropping
+    /// clients. Saves use temp + rename under the same directory.
+    pub fn with_clients_path(config: OAuthConfig, clients_path: Option<PathBuf>) -> Result<Self> {
+        let clients = match &clients_path {
+            Some(path) => load_clients(path)?,
+            None => HashMap::new(),
+        };
+        Ok(Self {
             config,
             codes: Arc::new(Mutex::new(HashMap::new())),
             refresh: Arc::new(Mutex::new(HashMap::new())),
-            clients: Arc::new(Mutex::new(HashMap::new())),
-        }
+            clients: Arc::new(Mutex::new(clients)),
+            clients_path,
+        })
+    }
+
+    /// Path of the durable DCR client registry, if persistence is enabled.
+    pub fn clients_path(&self) -> Option<&Path> {
+        self.clients_path.as_deref()
     }
 
     /// Pre-configured confidential client from serve flags / env.
@@ -336,6 +384,12 @@ impl OAuthState {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("oauth client lock poisoned"))?;
             guard.insert(client_id.clone(), record);
+            if let Some(path) = &self.clients_path
+                && let Err(e) = save_clients(path, &guard)
+            {
+                guard.remove(&client_id);
+                return Err(e).context("persist DCR client registry");
+            }
         }
 
         let mut body = json!({
@@ -664,6 +718,69 @@ fn random_token(nbytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(buf)
 }
 
+fn load_clients(path: &Path) -> Result<HashMap<String, RegisteredClient>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let bytes = fs::read(path).with_context(|| format!("read DCR clients {}", path.display()))?;
+    let file: ClientsFile = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse DCR clients {}", path.display()))?;
+    if file.version != CLIENTS_STORE_VERSION {
+        bail!(
+            "unsupported DCR clients store version {} (expected {CLIENTS_STORE_VERSION})",
+            file.version
+        );
+    }
+    let mut map = HashMap::new();
+    for mut client in file.clients {
+        if client.client_id.is_empty() {
+            bail!("DCR clients store contains empty client_id");
+        }
+        // Disk-backed entries are always DCR registrations — never open redirect.
+        client.open_redirect = false;
+        if map.insert(client.client_id.clone(), client).is_some() {
+            bail!("DCR clients store has duplicate client_id");
+        }
+    }
+    Ok(map)
+}
+
+fn save_clients(path: &Path, clients: &HashMap<String, RegisteredClient>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create DCR clients dir {}", parent.display()))?;
+    }
+    let mut records: Vec<RegisteredClient> = clients.values().cloned().collect();
+    records.sort_by(|a, b| a.client_id.cmp(&b.client_id));
+    for record in &mut records {
+        record.open_redirect = false;
+    }
+    let file = ClientsFile {
+        version: CLIENTS_STORE_VERSION,
+        clients: records,
+    };
+    let bytes = serde_json::to_vec_pretty(&file).context("serialize DCR clients")?;
+    write_atomic(path, &bytes).with_context(|| format!("write DCR clients {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Atomic replace: write `{name}.tmp` beside `path`, then rename over it.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut file = File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// Transport policy for the shared HTTP/gRPC listeners.
 ///
 /// Hivemind does not terminate TLS in-process by default. Production
@@ -957,6 +1074,60 @@ mod tests {
             ..ClientRegistrationRequest::default()
         });
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn dcr_clients_persist_across_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = default_clients_path(dir.path());
+        let config = OAuthConfig {
+            issuer: "http://127.0.0.1:8787".into(),
+            client_id: "hivemind-cli".into(),
+            client_secret: "client-secret".into(),
+            signing_key: "signing-key".into(),
+            resource: "http://127.0.0.1:8787/mcp".into(),
+            access_token_ttl_secs: DEFAULT_ACCESS_TOKEN_TTL_SECS,
+            refresh_token_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
+        };
+        let s = OAuthState::with_clients_path(config.clone(), Some(path.clone())).unwrap();
+        let reg = s
+            .register_client(&ClientRegistrationRequest {
+                redirect_uris: vec![],
+                client_name: Some("persist-me".into()),
+                token_endpoint_auth_method: Some("client_secret_post".into()),
+                grant_types: Some(vec!["client_credentials".into()]),
+                ..ClientRegistrationRequest::default()
+            })
+            .unwrap();
+        let client_id = reg["client_id"].as_str().unwrap().to_owned();
+        let client_secret = reg["client_secret"].as_str().unwrap().to_owned();
+        assert!(path.is_file(), "registry should be written on register");
+
+        // Fresh process: reload from the same file.
+        let reloaded = OAuthState::with_clients_path(config, Some(path)).unwrap();
+        let resp = reloaded
+            .exchange_token(&TokenForm {
+                grant_type: "client_credentials".into(),
+                client_id: Some(client_id.clone()),
+                client_secret: Some(client_secret),
+                ..TokenForm::default()
+            })
+            .unwrap();
+        let id = reloaded
+            .authenticate(resp["access_token"].as_str().unwrap(), "x")
+            .unwrap();
+        assert_eq!(id.principal, client_id);
+
+        // Configured static confidential client still works alongside DCR.
+        let configured = reloaded
+            .exchange_token(&TokenForm {
+                grant_type: "client_credentials".into(),
+                client_id: Some("hivemind-cli".into()),
+                client_secret: Some("client-secret".into()),
+                ..TokenForm::default()
+            })
+            .unwrap();
+        assert!(configured["access_token"].as_str().is_some());
     }
 
     #[test]
