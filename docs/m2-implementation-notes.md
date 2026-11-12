@@ -10,11 +10,12 @@ Status: **implemented** (2026-11-11). Milestone **M2 Evaluation harness** from
 1. `crates/hivebench` — scenario schema, loaders, gold ingest, offline E-R
    metrics (Recall@k, stale-hit, applicability precision, abstention).
 2. `scenarios/` — twelve seed scenario directories (families 1–12).
-3. Controlled harness skeleton with a token ledger (categories from 05).
+3. Controlled harness with a real token ledger (categories from 05) — see
+   [hivebench-ledger.md](hivebench-ledger.md) (HCP-27 replaced the dry-run stub).
 4. Baselines: B0, B1b (notes file), B1c (git-markdown + grep), B2
    (lexical-only / store BM25 as stand-in), oracle (gold inject).
 5. CLI: `hivebench er` (offline retrieval), `hivebench list`, `hivebench
-   validate`.
+   validate`, `hivebench ledger` (`dry-run` alias).
 6. Update [06](06-build-plan.md) with an M2 status section when landed.
 
 ## Scenario directory contract

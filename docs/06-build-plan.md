@@ -211,12 +211,13 @@ Working notes that guided the implementation are kept as historical in
 
 - **`crates/hivebench`:** scenario loader/validator, offline E-R metrics
   (Recall@k, stale-hit rate, abstention, applicability precision), baselines
-  B0 / B1b / B1c / B2 / Oracle / Hivemind, dry-run harness with a token
-  ledger stub (`docs/05` categories).
+  B0 / B1b / B1c / B2 / Oracle / Hivemind, controlled agent-loop token ledger
+  with measured schemas/cards and estimated embeddings
+  ([hivebench-ledger.md](hivebench-ledger.md); `docs/05` categories).
 - **`scenarios/`:** twelve seed families from
   [research/04 §9](../research/04-coding-agent-memory-practice.md#9-evaluation-seed-scenarios)
   (`01`–`12`), with timeline, gold memories, distractors, and probes.
-- **CLI:** `hivebench list|validate|er|dry-run`.
+- **CLI:** `hivebench list|validate|er|ledger` (`dry-run` alias).
 
 **What this proves / does not prove:** offline lexical retrieval quality and
 baseline plumbing for F1–F4-style work. It does not run paid LLM agent loops,

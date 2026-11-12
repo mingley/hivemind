@@ -60,7 +60,8 @@ into a shared service.
 | — | [MCP setup](docs/setup-mcp.md) | Build `hivemind` / `hivemindd`, configure Claude Code, Codex CLI, and Copilot CLI |
 | — | [Operations](docs/operations.md) | Run, backup, sync, health/metrics, auth env, release binaries, container |
 | — | [SECURITY.md](SECURITY.md) | Shared-service threat model: secrets, TLS proxy contract, tenants, tokens |
-| — | [hivebench scenarios](scenarios/README.md) | M2 seed scenarios for offline retrieval and harness dry-runs |
+| — | [hivebench scenarios](scenarios/README.md) | M2 seed scenarios for offline retrieval and controlled token ledger |
+| — | [hivebench ledger](docs/hivebench-ledger.md) | Controlled loop: measured vs estimated token categories |
 
 The [`research/`](research/) directory holds the sourced research reports these
 documents build on. Every external claim is labeled **[V]** verified, **[C]**
@@ -150,5 +151,5 @@ crates/
   hivemind-core/     memory model types: claims, events, scopes, applicability, belief, hygiene
   hivemind-engine/   storage engine: log, blobs, projections, BM25, recall
   hivemind/          `hivemind` CLI, `hivemindd` daemon, and `hivemind mcp` stdio shim
-  hivebench/         M2 evaluation harness (offline E-R, baselines, dry-run)
+  hivebench/         M2 evaluation harness (offline E-R, baselines, token ledger)
 ```

@@ -1,11 +1,11 @@
-//! `hivebench`: list / validate scenarios and run offline E-R.
+//! `hivebench`: list / validate scenarios, offline E-R, controlled token ledger.
 
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use hivebench::baselines::Condition;
-use hivebench::harness;
+use hivebench::harness::{self, LoopOptions};
 use hivebench::scenario::{self, load_scenario, load_scenarios, validate_scenario};
 
 #[derive(Parser, Debug)]
@@ -38,12 +38,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Dry-run harness: E-R plus token ledger stub.
-    DryRun {
+    /// Controlled agent loop with measured/estimated token ledger (docs/hivebench-ledger.md).
+    #[command(visible_alias = "dry-run")]
+    Ledger {
         #[arg(long, value_enum, default_value_t = Cond::Hivemind)]
         condition: Cond,
         #[arg(long, default_value_t = 8)]
         k: usize,
+        /// Skip L1 show expansion (no followup_expansion entries).
+        #[arg(long)]
+        no_expand: bool,
         id: Option<String>,
         #[arg(long)]
         json: bool,
@@ -112,26 +116,41 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::DryRun {
+        Command::Ledger {
             condition,
             k,
+            no_expand,
             id,
             json,
         } => {
             let condition = Condition::from(condition);
             for s in select(&cli.scenarios, id.as_deref())? {
-                let run = harness::dry_run(&s, condition, k)?;
+                let run = harness::run_controlled(
+                    &s,
+                    condition,
+                    LoopOptions {
+                        run_id: "controlled".into(),
+                        expand_top: !no_expand,
+                        k,
+                    },
+                )?;
                 if json {
                     println!("{}", serde_json::to_string(&run)?);
                 } else {
                     println!(
-                        "{} [{}] recall@k={:.2} ledger_tokens={} memory_tokens={}",
+                        "{} [{}] turns={} recall@k={:.2} ledger={} memory={} measured={} estimated={}",
                         run.scenario,
                         run.condition,
+                        run.turns,
                         run.er.recall_at_k(),
                         run.ledger.total_non_judge_tokens(),
                         run.ledger.memory_attributable_tokens(),
+                        run.ledger.measured_tokens(),
+                        run.ledger.estimated_tokens(),
                     );
+                    for (cat, n) in run.ledger.tokens_by_category() {
+                        println!("  {cat}: {n}");
+                    }
                 }
             }
         }

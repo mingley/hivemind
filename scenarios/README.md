@@ -33,4 +33,10 @@ Each directory contains:
 | [11-stale-convention](11-stale-convention/) | Stale convention vs code | `project:acme/ledger` |
 | [12-parallel-agents-leases](12-parallel-agents-leases/) | Parallel agents + lease reclaim | `project:acme/protocol` |
 
-Load with `hivebench` (`load_scenarios("scenarios")`) once the crate CLI is wired.
+Load with `hivebench` (`load_scenarios("scenarios")`). Token ledger:
+
+```bash
+cargo run -p hivebench -- ledger --condition hivemind 01-recurring-ci-failure
+```
+
+Measured vs estimated categories: [docs/hivebench-ledger.md](../docs/hivebench-ledger.md).
