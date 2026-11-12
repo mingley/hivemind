@@ -50,12 +50,19 @@ Daemon, `hivemind serve`, and gRPC all call the same tracing init.
 | `HIVEMIND_OAUTH_CLIENT_ID` | Pre-registered confidential client id | `hivemind-cli` |
 | `HIVEMIND_ACCESS_TOKEN_TTL_SECS` | Access-token lifetime (short TTL) | `300` |
 | `HIVEMIND_REFRESH_TOKEN_TTL_SECS` | Refresh-token lifetime (`authorization_code` / `refresh_token`) | `604800` (7d) |
+| `HIVEMIND_TOKEN_RATE_PER_MINUTE` | Sustained `/oauth/token` rate per client IP+`client_id` (`0` disables) | `60` |
+| `HIVEMIND_RPC_RATE_PER_MINUTE` | Sustained authenticated HTTP/MCP/gRPC RPC rate per IP+principal (`0` disables) | `600` |
 | `HIVEMIND_REQUIRE_TLS` | `1`/`true`/`yes` — refuse start unless `PUBLIC_BASE` is `https://` | unset |
 | `HIVEMIND_GRPC_LISTEN` | gRPC listen address | same host as HTTP, port `8788` |
 
 Flags: `--listen` (default `127.0.0.1:8787`), `--no-grpc`, `--token`,
 `--oauth-client-secret`, `--signing-key`, `--access-token-ttl-secs`,
-`--refresh-token-ttl-secs`, `--require-tls`, `--root`.
+`--refresh-token-ttl-secs`, `--token-rate-per-minute`,
+`--rpc-rate-per-minute`, `--require-tls`, `--root`.
+
+**Rate limits:** in-process token buckets. Excess `/oauth/token` or authenticated
+RPC returns HTTP `429` with `Retry-After` (gRPC: `RESOURCE_EXHAUSTED`).
+`/health`, `/readyz`, `/metrics`, and `/healthz` are not rate-limited.
 
 **OAuth tokens:** `client_credentials` returns a short-lived access token only
 (machine agents re-auth with the client secret). Interactive

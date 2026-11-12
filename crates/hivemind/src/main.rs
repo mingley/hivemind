@@ -166,6 +166,20 @@ struct ServeArgs {
     /// Disable the gRPC listener.
     #[arg(long, default_value_t = false)]
     no_grpc: bool,
+    /// `/oauth/token` sustained rate per IP+client_id (0 disables).
+    #[arg(
+        long,
+        default_value_t = hivemind::ratelimit::DEFAULT_TOKEN_RATE_PER_MINUTE,
+        env = "HIVEMIND_TOKEN_RATE_PER_MINUTE"
+    )]
+    token_rate_per_minute: u64,
+    /// Authenticated HTTP/MCP/gRPC RPC sustained rate per IP+principal (0 disables).
+    #[arg(
+        long,
+        default_value_t = hivemind::ratelimit::DEFAULT_RPC_RATE_PER_MINUTE,
+        env = "HIVEMIND_RPC_RATE_PER_MINUTE"
+    )]
+    rpc_rate_per_minute: u64,
     /// Skip fsync (tests only).
     #[arg(long, hide = true)]
     no_fsync: bool,
@@ -549,6 +563,8 @@ fn run(cli: Cli) -> Result<()> {
                 refresh_token_ttl_secs: args.refresh_token_ttl_secs,
                 require_tls,
                 grpc_listen,
+                token_rate_per_minute: args.token_rate_per_minute,
+                rpc_rate_per_minute: args.rpc_rate_per_minute,
             }));
         }
         Command::Backup(args) => {

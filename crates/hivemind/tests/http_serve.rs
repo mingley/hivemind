@@ -23,6 +23,8 @@ fn test_args(root: std::path::PathBuf, addr: SocketAddr) -> ServeArgs {
         refresh_token_ttl_secs: oauth::DEFAULT_REFRESH_TOKEN_TTL_SECS,
         require_tls: false,
         grpc_listen: None,
+        token_rate_per_minute: hivemind::ratelimit::DEFAULT_TOKEN_RATE_PER_MINUTE,
+        rpc_rate_per_minute: hivemind::ratelimit::DEFAULT_RPC_RATE_PER_MINUTE,
     }
 }
 
@@ -123,9 +125,7 @@ async fn health_oauth_metadata_and_rpc() {
     );
     let grants = as_body["grant_types_supported"].as_array().unwrap();
     assert!(
-        grants
-            .iter()
-            .any(|g| g.as_str() == Some("refresh_token")),
+        grants.iter().any(|g| g.as_str() == Some("refresh_token")),
         "AS metadata should advertise refresh_token: {as_body}"
     );
 
@@ -507,6 +507,116 @@ async fn tenant_isolation_no_cross_read() {
         "path traversal tenant must fail: {}",
         traversal.status()
     );
+
+    serve.abort();
+}
+
+/// P1: excess `/oauth/token` and authenticated RPC get 429; ops probes stay open.
+#[tokio::test]
+async fn rate_limit_token_and_rpc_return_429_ops_exempt() {
+    let root = tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let mut args = test_args(root.path().to_path_buf(), addr);
+    args.token_rate_per_minute = 3;
+    args.rpc_rate_per_minute = 3;
+    let token = args.token.clone();
+    let client_secret = args.oauth_client_secret.clone();
+    let serve = tokio::spawn(http::serve(args));
+    wait_for(addr).await;
+    let client = reqwest::Client::new();
+
+    let mut token_statuses = Vec::new();
+    for _ in 0..5 {
+        let resp = client
+            .post(format!("http://{addr}/oauth/token"))
+            .form(&[
+                ("grant_type", "client_credentials"),
+                ("client_id", "hivemind-cli"),
+                ("client_secret", client_secret.as_str()),
+            ])
+            .send()
+            .await
+            .unwrap();
+        token_statuses.push(resp.status().as_u16());
+    }
+    assert!(
+        token_statuses.iter().filter(|&&s| s == 200).count() >= 1,
+        "expected some token successes: {token_statuses:?}"
+    );
+    assert!(
+        token_statuses.contains(&429),
+        "expected token 429 after bursting: {token_statuses:?}"
+    );
+
+    // Ops probes must remain reachable under token+RPC pressure.
+    for path in ["/health", "/readyz", "/metrics", "/healthz"] {
+        let probe = client
+            .get(format!("http://{addr}{path}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            probe.status(),
+            200,
+            "{path} must stay open under rate limits"
+        );
+    }
+
+    // Fresh process key for RPC: mint with a second server would be heavy; instead
+    // use bootstrap bearer against RPC with a tight rpc limit on this same process.
+    // Token class may still be exhausted; bootstrap path skips /oauth/token.
+    let mut rpc_statuses = Vec::new();
+    for _ in 0..6 {
+        let resp = client
+            .get(format!("http://{addr}/v1/tenants"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        rpc_statuses.push(resp.status().as_u16());
+    }
+    assert!(
+        rpc_statuses.contains(&200),
+        "expected some RPC successes: {rpc_statuses:?}"
+    );
+    assert!(
+        rpc_statuses.contains(&429),
+        "expected RPC 429 after bursting: {rpc_statuses:?}"
+    );
+    let limited = client
+        .get(format!("http://{addr}/v1/tenants"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), 429);
+    assert!(
+        limited.headers().get("retry-after").is_some(),
+        "429 should include Retry-After"
+    );
+
+    // Probes still OK after RPC exhaustion.
+    let health = client
+        .get(format!("http://{addr}/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health.status(), 200);
+    let readyz = client
+        .get(format!("http://{addr}/readyz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(readyz.status(), 200);
+    let metrics = client
+        .get(format!("http://{addr}/metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(metrics.status(), 200);
 
     serve.abort();
 }

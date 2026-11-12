@@ -9,6 +9,9 @@
 //! - `/mcp` — MCP Streamable HTTP for `--default-tenant`
 //! - `/v1/tenants…` — JSON API (bearer: OAuth access token or bootstrap token)
 //!
+//! Rate limits (in-process token buckets): `/oauth/token` and authenticated
+//! RPC/MCP paths. Ops probes above are exempt.
+//!
 //! Transport: this process speaks plaintext HTTP. Production deployments MUST
 //! terminate TLS at a reverse proxy (or equivalent) and set
 //! `HIVEMIND_REQUIRE_TLS=1` so a non-`https://` public base is refused. See
@@ -22,7 +25,7 @@ use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow};
 use axum::Router;
-use axum::extract::{Extension, Form, Path as AxumPath, Query, State};
+use axum::extract::{ConnectInfo, Extension, Form, Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -41,6 +44,7 @@ use crate::oauth::{
     validate_transport,
 };
 use crate::obs;
+use crate::ratelimit::{self, RateClass, RateLimitConfig, RateLimited, RateLimiter};
 use crate::service::Service;
 use crate::sync;
 use crate::tenant::{self, ensure_tenant_dir, list_tenants};
@@ -69,6 +73,10 @@ pub struct ServeArgs {
     pub require_tls: bool,
     /// Optional gRPC listen address (spawned alongside HTTP).
     pub grpc_listen: Option<SocketAddr>,
+    /// Sustained `/oauth/token` requests per minute per IP+client_id (`0` = off).
+    pub token_rate_per_minute: u64,
+    /// Sustained authenticated RPC requests per minute per IP+principal (`0` = off).
+    pub rpc_rate_per_minute: u64,
 }
 
 struct AppState {
@@ -78,6 +86,7 @@ struct AppState {
     oauth: OAuthState,
     default_tenant: String,
     stores: Mutex<HashMap<String, Arc<Service>>>,
+    limiter: Arc<RateLimiter>,
 }
 
 pub async fn serve(args: ServeArgs) -> Result<()> {
@@ -103,6 +112,11 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         refresh_token_ttl_secs: args.refresh_token_ttl_secs,
     });
 
+    let limiter = Arc::new(RateLimiter::new(RateLimitConfig {
+        token_per_minute: args.token_rate_per_minute,
+        rpc_per_minute: args.rpc_rate_per_minute,
+    }));
+
     let state = Arc::new(AppState {
         root: args.root.clone(),
         token: args.token.clone(),
@@ -114,6 +128,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         oauth: oauth.clone(),
         default_tenant: args.default_tenant.clone(),
         stores: Mutex::new(HashMap::new()),
+        limiter: limiter.clone(),
     });
 
     // Ensure default tenant store exists before mounting MCP.
@@ -146,6 +161,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         ]),
     );
 
+    // Layers apply outermost-last on the request path: bearer runs before RPC limit.
     let protected = Router::new()
         .route("/v1/tenants", get(tenants_list))
         .route("/v1/tenants/{tenant}/hello", get(tenant_hello))
@@ -155,9 +171,14 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         .nest_service("/mcp", mcp)
         .layer(middleware::from_fn_with_state(
             state.clone(),
+            rate_limit_rpc,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
             require_bearer,
         ));
 
+    // Ops probes stay open (no rate-limit layer). Token endpoint is limited in-handler.
     let app = Router::new()
         .route("/health", get(health))
         .route("/readyz", get(readyz))
@@ -187,6 +208,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
             listen: grpc_listen,
             token: args.token.clone(),
             oauth: oauth.clone(),
+            limiter: limiter.clone(),
             no_fsync: args.no_fsync,
         };
         tokio::spawn(async move {
@@ -206,9 +228,15 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         tenant = %args.default_tenant,
         issuer = %issuer,
         require_tls = args.require_tls,
+        token_rate_per_minute = args.token_rate_per_minute,
+        rpc_rate_per_minute = args.rpc_rate_per_minute,
         "hivemind HTTP service listening"
     );
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -279,6 +307,24 @@ async fn require_bearer(
     }
 }
 
+async fn rate_limit_rpc(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> Response {
+    let principal = request
+        .extensions()
+        .get::<AuthIdentity>()
+        .map(|id| id.principal.as_str())
+        .unwrap_or("anonymous");
+    let key = ratelimit::peer_key(&addr.ip().to_string(), principal);
+    match state.limiter.check(RateClass::Rpc, &key) {
+        Ok(()) => next.run(request).await,
+        Err(limited) => too_many_requests(limited),
+    }
+}
+
 fn unauthorized(state: &AppState, message: String) -> Response {
     let resource_meta = format!(
         "{}/.well-known/oauth-protected-resource",
@@ -289,6 +335,23 @@ fn unauthorized(state: &AppState, message: String) -> Response {
         StatusCode::UNAUTHORIZED,
         [(axum::http::header::WWW_AUTHENTICATE, www)],
         Json(json!({"error": message})),
+    )
+        .into_response()
+}
+
+fn too_many_requests(limited: RateLimited) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(
+            axum::http::header::RETRY_AFTER,
+            HeaderValue::from_str(&limited.retry_after_secs.to_string())
+                .unwrap_or_else(|_| HeaderValue::from_static("1")),
+        )],
+        Json(json!({
+            "error": "rate_limited",
+            "error_description": "too many requests; slow down",
+            "retry_after_secs": limited.retry_after_secs,
+        })),
     )
         .into_response()
 }
@@ -406,6 +469,7 @@ async fn oauth_authorize(
 
 async fn oauth_token(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Form(mut form): Form<TokenForm>,
 ) -> Result<Json<Value>, ApiError> {
@@ -415,6 +479,11 @@ async fn oauth_token(
             .and_then(|v| v.to_str().ok()),
     );
     oauth::merge_basic_into_form(&mut form, basic);
+    let client_id = form.client_id.as_deref().unwrap_or("unknown");
+    let key = ratelimit::peer_key(&addr.ip().to_string(), client_id);
+    if let Err(limited) = state.limiter.check(RateClass::Token, &key) {
+        return Err(ApiError::rate_limited(limited));
+    }
     let value = state.oauth.exchange_token(&form).map_err(ApiError::from)?;
     Ok(Json(value))
 }
@@ -552,6 +621,17 @@ impl AppState {
 struct ApiError {
     status: StatusCode,
     message: String,
+    retry_after_secs: Option<u64>,
+}
+
+impl ApiError {
+    fn rate_limited(limited: RateLimited) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "rate_limited".into(),
+            retry_after_secs: Some(limited.retry_after_secs),
+        }
+    }
 }
 
 impl From<anyhow::Error> for ApiError {
@@ -559,13 +639,31 @@ impl From<anyhow::Error> for ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: value.to_string(),
+            retry_after_secs: None,
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({ "error": self.message }))).into_response()
+        let body = if self.status == StatusCode::TOO_MANY_REQUESTS {
+            json!({
+                "error": "rate_limited",
+                "error_description": "too many requests; slow down",
+                "retry_after_secs": self.retry_after_secs.unwrap_or(1),
+            })
+        } else {
+            json!({ "error": self.message })
+        };
+        let mut response = (self.status, Json(body)).into_response();
+        if let Some(secs) = self.retry_after_secs
+            && let Ok(value) = HeaderValue::from_str(&secs.to_string())
+        {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
+        response
     }
 }
 

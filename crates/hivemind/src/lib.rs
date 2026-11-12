@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod oauth;
 pub mod obs;
 pub mod protocol;
+pub mod ratelimit;
 pub mod service;
 pub mod sync;
 pub mod tenant;

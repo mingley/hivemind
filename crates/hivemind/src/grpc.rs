@@ -12,6 +12,7 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 
 use crate::oauth::OAuthState;
+use crate::ratelimit::{self, RateClass, RateLimiter};
 use crate::service::Service;
 use crate::sync;
 use crate::tenant::{self, ensure_tenant_dir};
@@ -30,6 +31,7 @@ struct GrpcState {
     root: PathBuf,
     token: String,
     oauth: OAuthState,
+    limiter: Arc<RateLimiter>,
     durability: Durability,
     stores: Arc<Mutex<HashMap<String, Arc<Service>>>>,
 }
@@ -48,6 +50,7 @@ pub struct GrpcArgs {
     pub listen: SocketAddr,
     pub token: String,
     pub oauth: OAuthState,
+    pub limiter: Arc<RateLimiter>,
     pub no_fsync: bool,
 }
 
@@ -57,6 +60,7 @@ pub async fn serve(args: GrpcArgs) -> Result<()> {
         root: args.root.clone(),
         token: args.token,
         oauth: args.oauth,
+        limiter: args.limiter,
         durability: if args.no_fsync {
             Durability::NoFsync
         } else {
@@ -136,9 +140,22 @@ impl GrpcState {
             .and_then(|v| v.to_str().ok());
         let token =
             sync::bearer_token(header).map_err(|e| Status::unauthenticated(e.to_string()))?;
-        self.oauth
+        let identity = self
+            .oauth
             .authenticate(token, &self.token)
-            .map_err(|e| Status::unauthenticated(e.to_string()))
+            .map_err(|e| Status::unauthenticated(e.to_string()))?;
+        let ip = request
+            .remote_addr()
+            .map(|addr| addr.ip().to_string())
+            .unwrap_or_else(|| "unknown".into());
+        let key = ratelimit::peer_key(&ip, &identity.principal);
+        if let Err(limited) = self.limiter.check(RateClass::Rpc, &key) {
+            return Err(Status::resource_exhausted(format!(
+                "rate_limited; retry_after_secs={}",
+                limited.retry_after_secs
+            )));
+        }
+        Ok(identity)
     }
 
     fn service_for(&self, tenant: &str) -> Result<Arc<Service>, Status> {
