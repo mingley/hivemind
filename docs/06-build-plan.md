@@ -126,6 +126,10 @@ change until then):
   `JSON_V1` = 1), covered by golden fixtures and property tests; full
   research-09 frame redesign deferred (would be a format bump).
 - Evaluate a `postcard` codec (codec 2) next to readable JSON (codec 1).
+  **Done:** `POSTCARD_V1 = 2` beside `JSON_V1 = 1`; JSON remains the default
+  for new appends. Select with `HIVEMIND_EVENT_CODEC=postcard` /
+  `Options.event_codec` (see [operations.md](operations.md#event-codec)).
+  Codecs may be mixed in one log; readers accept every known tag.
 - Group commit across concurrent writers through a single writer thread
   (daemon path lands in M1; explicit batching channel still optional).
 - Guard free disk space before `ENOSPC`. Sweep stray temporary blob files at
@@ -189,8 +193,8 @@ change until then):
   [setup-mcp.md](setup-mcp.md#sandbox-answer-claude-code--proven-default-path).
 - **Per-agent identity** is environment-provided only (trust-on-first-use
   locally); shared-service auth is separate (`hivemind serve` / OAuth).
-- **Default event encoding** (JSON v1) was not revisited; postcard remains a
-  follow-up.
+- **Default event encoding** stays JSON v1 for readability; postcard (codec 2)
+  is available as an alternate write codec (`HIVEMIND_EVENT_CODEC`).
 
 **What this proves / does not prove:** several agents on one machine can share
 a durable store through the MCP shim and change feed; Claude Code’s default
@@ -331,4 +335,4 @@ production ANN library under all distributions.
 | Which embedding model, if any, is the default? | Footprint and quality | F4 offline in M2, online in M4 |
 | What erasure SLA, and is crypto-shredding enough legally? | Privacy compliance for shared use | Before M5 |
 | License for the repository | Adoption and contributions | Owner decision before the first release |
-| Default event encoding (JSON v1 now) | Size, speed, and canonical hashing | [research/09](../research/09-engine-design-techniques.md); not revisited in M1; still open |
+| Default event encoding (JSON v1 now) | Size, speed, and canonical hashing | **Landed:** postcard codec 2 optional; JSON remains default — [operations.md](operations.md#event-codec) |

@@ -122,4 +122,4 @@ docs/setup-mcp.md         # Claude Code, Codex, Copilot CLI
 ## Out of scope for M1
 
 Remote HTTP/gRPC, OAuth, leases/handoffs beyond claim kind, vectors, LazyFS,
-postcard codec evaluation (note only), forget/purge.
+postcard codec (landed as `POSTCARD_V1`; JSON remains default), forget/purge.

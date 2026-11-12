@@ -27,6 +27,7 @@ pub mod state;
 pub mod store;
 pub mod vector;
 
+pub use codec::{EventCodec, JSON_V1, POSTCARD_V1, encode, encode_with, peek_codec};
 pub use error::{Error, Result};
 pub use indexseg::LexicalSegment;
 pub use log::{

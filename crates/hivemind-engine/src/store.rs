@@ -25,7 +25,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::blob::BlobStore;
-use crate::codec;
+use crate::codec::{self, EventCodec};
 use crate::error::{Error, Result};
 use crate::fsutil;
 use crate::indexseg::LexicalSegment;
@@ -54,6 +54,10 @@ pub struct Options {
     /// Cap on distinct BM25 token types. New rare tokens are dropped once the
     /// dictionary reaches this size. Defaults to [`DEFAULT_MAX_TERMS`].
     pub max_terms: usize,
+    /// Codec for newly appended events. Readers accept every known codec tag
+    /// in the same log ([`JSON_V1`](crate::codec::JSON_V1) and
+    /// [`POSTCARD_V1`](crate::codec::POSTCARD_V1)). Defaults to JSON.
+    pub event_codec: EventCodec,
 }
 
 impl Default for Options {
@@ -62,7 +66,16 @@ impl Default for Options {
             durability: Durability::Fsync,
             segment_bytes: DEFAULT_SEGMENT_BYTES,
             max_terms: DEFAULT_MAX_TERMS,
+            event_codec: EventCodec::JsonV1,
         }
+    }
+}
+
+impl Options {
+    /// Apply `HIVEMIND_EVENT_CODEC` when set (see [`EventCodec::from_env`]).
+    pub fn with_env_overrides(mut self) -> Result<Self> {
+        self.event_codec = EventCodec::from_env()?;
+        Ok(self)
     }
 }
 
@@ -247,6 +260,7 @@ pub struct Store {
     snapshot_offset: u64,
     embedder: Mutex<Option<Arc<dyn Embedder>>>,
     durability: Durability,
+    event_codec: EventCodec,
     _lock: File,
 }
 
@@ -341,6 +355,7 @@ impl Store {
             snapshot_offset,
             embedder: Mutex::new(None),
             durability: options.durability,
+            event_codec: options.event_codec,
             _lock: lock,
         };
         if store.recovery.truncated_bytes > 0 {
@@ -734,7 +749,12 @@ impl Store {
                 ));
             }
         }
-        let redacted = codec::encode(&event)?;
+        // Preserve the original codec tag so in-place padding stays valid for
+        // both JSON (trailing spaces) and postcard frames.
+        let codec = codec::peek_codec(&bytes)
+            .and_then(EventCodec::from_tag)
+            .unwrap_or(self.event_codec);
+        let redacted = codec::encode_with(codec, &event)?;
         self.log.lock().rewrite_event(offset, &redacted)?;
         Ok(())
     }
@@ -998,7 +1018,7 @@ impl Store {
             idempotency_key,
             body,
         };
-        let bytes = codec::encode(&event)?;
+        let bytes = codec::encode_with(self.event_codec, &event)?;
         // Never acknowledge an event that replay couldn't decode: that would
         // leave a store that refuses to reopen.
         codec::decode(log.next_offset(), &bytes)

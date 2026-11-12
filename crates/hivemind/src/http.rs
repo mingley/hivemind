@@ -618,14 +618,13 @@ impl AppState {
             }
         }
         let dir = ensure_tenant_dir(&self.root, tenant).map_err(ApiError::from)?;
-        let store = Store::open(
-            &dir,
-            Options {
-                durability: self.durability,
-                ..Options::default()
-            },
-        )
+        let options = Options {
+            durability: self.durability,
+            ..Options::default()
+        }
+        .with_env_overrides()
         .map_err(|e| ApiError::from(anyhow!(e)))?;
+        let store = Store::open(&dir, options).map_err(|e| ApiError::from(anyhow!(e)))?;
         let service = Arc::new(Service::new(store));
         let mut guard = self
             .stores
@@ -698,14 +697,12 @@ impl IntoResponse for ApiError {
 /// Open (or create) the store for a tenant under `root` — used by CLI helpers.
 pub fn open_tenant_store(root: &Path, tenant: &str, durability: Durability) -> Result<Store> {
     let dir = ensure_tenant_dir(root, tenant)?;
-    Store::open(
-        &dir,
-        Options {
-            durability,
-            ..Options::default()
-        },
-    )
-    .map_err(Into::into)
+    let options = Options {
+        durability,
+        ..Options::default()
+    }
+    .with_env_overrides()?;
+    Store::open(&dir, options).map_err(Into::into)
 }
 
 /// Helper for tests / docs: default short TTL.

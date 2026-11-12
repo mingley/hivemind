@@ -50,14 +50,14 @@ pub fn run(args: DaemonArgs) -> Result<()> {
     } else {
         Durability::Fsync
     };
-    let store = Store::open(
-        &dir,
-        Options {
-            durability,
-            ..Options::default()
-        },
-    )
-    .with_context(|| format!("open store {}", dir.display()))?;
+    let options = Options {
+        durability,
+        ..Options::default()
+    }
+    .with_env_overrides()
+    .context("HIVEMIND_EVENT_CODEC")?;
+    let store =
+        Store::open(&dir, options).with_context(|| format!("open store {}", dir.display()))?;
     let service = Arc::new(Service::new(store));
     let run_dir = dir.join(RUN_DIR);
     fs::create_dir_all(&run_dir)?;

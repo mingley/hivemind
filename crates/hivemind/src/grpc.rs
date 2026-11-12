@@ -171,14 +171,13 @@ impl GrpcState {
         }
         let dir =
             ensure_tenant_dir(&self.root, tenant).map_err(|e| Status::internal(e.to_string()))?;
-        let store = Store::open(
-            &dir,
-            Options {
-                durability: self.durability,
-                ..Options::default()
-            },
-        )
+        let options = Options {
+            durability: self.durability,
+            ..Options::default()
+        }
+        .with_env_overrides()
         .map_err(|e| Status::internal(e.to_string()))?;
+        let store = Store::open(&dir, options).map_err(|e| Status::internal(e.to_string()))?;
         let service = Arc::new(Service::new(store));
         let mut guard = self
             .stores

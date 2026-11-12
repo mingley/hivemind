@@ -1,6 +1,6 @@
-//! Golden fixtures that freeze segment-header, commit-record, and JSON_V1
-//! codec bytes for [`SEGMENT_FORMAT`] / [`JSON_V1`]. A silent format change
-//! fails these tests before the first release tag.
+//! Golden fixtures that freeze segment-header, commit-record, and event
+//! codec bytes for [`SEGMENT_FORMAT`] / [`JSON_V1`] / [`POSTCARD_V1`]. A
+//! silent format change fails these tests before the first release tag.
 
 use std::fs;
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ use hivemind_core::{
     Actor, ClaimData, ClaimId, ClaimKind, EVENT_VERSION, Event, EventBody, EventId, Scope,
     Timestamp,
 };
-use hivemind_engine::codec::{self, JSON_V1};
+use hivemind_engine::codec::{self, EventCodec, JSON_V1, POSTCARD_V1};
 use hivemind_engine::store::STORE_FORMAT;
 use hivemind_engine::{
     SEGMENT_FORMAT, SEGMENT_MAGIC, encode_record, encode_segment_header, try_decode_record,
@@ -54,6 +54,7 @@ fn release_format_versions_are_pinned() {
         "segment header format must not change silently"
     );
     assert_eq!(JSON_V1, 1, "event codec id must not change silently");
+    assert_eq!(POSTCARD_V1, 2, "postcard codec id must not change silently");
     assert_eq!(
         EVENT_VERSION, 1,
         "event schema version must not change silently"
@@ -104,6 +105,23 @@ fn codec_json_v1_golden_matches_encode() {
     );
     assert_eq!(got[0], JSON_V1);
     assert_eq!(codec::decode(0, &got).unwrap(), event);
+}
+
+#[test]
+fn codec_postcard_v1_golden_matches_encode() {
+    let event = sample_event();
+    let got = codec::encode_with(EventCodec::PostcardV1, &event).unwrap();
+    let want = read_fixture("codec/postcard_v1_claim_asserted.bin");
+    assert_eq!(
+        got, want,
+        "POSTCARD_V1 event bytes drifted; regenerate fixtures only with an intentional codec bump"
+    );
+    assert_eq!(got[0], POSTCARD_V1);
+    assert_eq!(codec::decode(0, &got).unwrap(), event);
+    assert!(
+        got.len() < codec::encode(&event).unwrap().len(),
+        "postcard should be more compact than JSON for the freeze sample"
+    );
 }
 
 #[test]

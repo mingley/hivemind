@@ -27,7 +27,8 @@ impl Backend {
                 Durability::Fsync
             },
             ..Options::default()
-        };
+        }
+        .with_env_overrides()?;
         Ok(Self::Local(Box::new(Store::open(dir, options)?)))
     }
 

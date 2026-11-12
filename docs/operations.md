@@ -32,10 +32,37 @@ Daemon, `hivemind serve`, and gRPC all call the same tracing init.
 |---|---|---|
 | `HIVEMIND_DIR` | Store directory | `~/.hivemind/store` |
 | `HIVEMIND_IDLE_TIMEOUT` | Daemon idle exit seconds; `0` disables | `600` |
+| `HIVEMIND_EVENT_CODEC` | Codec for **new** log appends: `json` / `1` (default) or `postcard` / `2` | `json` |
 | `HIVEMIND_PRINCIPAL` | Author principal on writes | `$USER` / `anonymous` |
 | `HIVEMIND_AGENT` | Agent name on writes | unset |
 | `HIVEMIND_SESSION` | Session id on writes | unset |
 | `HIVEMIND_WORKSPACE` | Workspace root for citation checks (CLI) | cwd |
+
+### Event codec
+
+Each event payload starts with a codec tag. Readers keep every codec they have
+ever written, so a single log may contain mixed codecs:
+
+| Tag | Name | Role |
+|---|---|---|
+| `1` | `JSON_V1` | Default. `serde_json` of the event (human-readable). |
+| `2` | `POSTCARD_V1` | Compact postcard wire of the same logical event. |
+
+Select the write codec with `HIVEMIND_EVENT_CODEC` (daemon, CLI local open,
+`hivemind serve` / gRPC tenant open) or `Options.event_codec` in process:
+
+```bash
+# default — readable JSON frames
+hivemindd
+
+# compact postcard for new appends (existing JSON events still replay)
+HIVEMIND_EVENT_CODEC=postcard hivemindd
+```
+
+Changing the codec does **not** rewrite history. Replay / `verify` accept both
+tags in one store. Golden fixtures:
+`crates/hivemind-engine/tests/fixtures/codec/json_v1_claim_asserted.bin` and
+`postcard_v1_claim_asserted.bin`.
 
 ### Shared service (`hivemind serve`)
 

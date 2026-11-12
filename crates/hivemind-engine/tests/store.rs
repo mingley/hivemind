@@ -1045,3 +1045,86 @@ fn forget_erases_claim_from_recall_and_survives_reopen() {
         .forget(&agent("privacy-officer"), claim_id, "retry purge", None)
         .unwrap();
 }
+
+#[test]
+fn mixed_json_and_postcard_codecs_append_and_replay() {
+    use hivemind_engine::{EventCodec, JSON_V1, POSTCARD_V1, peek_codec};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let actor = agent("mixed-codec");
+
+    {
+        let store = Store::open(
+            tmp.path(),
+            Options {
+                event_codec: EventCodec::JsonV1,
+                ..options()
+            },
+        )
+        .unwrap();
+        store
+            .remember(
+                &actor,
+                Remember::new(claim(ClaimKind::Fact, "json-encoded claim")),
+            )
+            .unwrap();
+    }
+
+    {
+        let store = Store::open(
+            tmp.path(),
+            Options {
+                event_codec: EventCodec::PostcardV1,
+                ..options()
+            },
+        )
+        .unwrap();
+        store
+            .remember(
+                &actor,
+                Remember::new(claim(ClaimKind::Fact, "postcard-encoded claim")),
+            )
+            .unwrap();
+    }
+
+    // Default JSON writer reopen must replay both codecs.
+    let store = Store::open(tmp.path(), options()).unwrap();
+    let recall = store.recall(&Query {
+        text: "encoded claim".into(),
+        ..Query::default()
+    });
+    let statements: Vec<_> = recall.cards.iter().map(|c| c.statement.clone()).collect();
+    assert!(
+        statements.iter().any(|s| s.contains("json-encoded")),
+        "{statements:?}"
+    );
+    assert!(
+        statements.iter().any(|s| s.contains("postcard-encoded")),
+        "{statements:?}"
+    );
+
+    // Confirm both codec tags are present on disk in the same log.
+    drop(store);
+    let mut tags = Vec::new();
+    let (_log, recovery) = hivemind_engine::log::Log::open(
+        &tmp.path().join("log"),
+        Durability::NoFsync,
+        hivemind_engine::log::DEFAULT_SEGMENT_BYTES,
+        |_offset, bytes| {
+            if let Some(tag) = peek_codec(bytes) {
+                tags.push(tag);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(recovery.truncated_bytes, 0);
+    assert!(
+        tags.contains(&JSON_V1),
+        "expected a JSON_V1 event in mixed log, tags={tags:?}"
+    );
+    assert!(
+        tags.contains(&POSTCARD_V1),
+        "expected a POSTCARD_V1 event in mixed log, tags={tags:?}"
+    );
+}

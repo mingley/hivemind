@@ -6,7 +6,7 @@ use hivemind_core::{
     Actor, ClaimData, ClaimId, ClaimKind, EVENT_VERSION, Event, EventBody, EventId, Scope,
     Timestamp,
 };
-use hivemind_engine::codec;
+use hivemind_engine::codec::{self, EventCodec};
 use hivemind_engine::{encode_record, encode_segment_header};
 use uuid::Uuid;
 
@@ -54,6 +54,9 @@ fn main() {
 
     let payload = codec::encode(&sample_event()).unwrap();
     fs::write(root.join("codec/json_v1_claim_asserted.bin"), &payload).unwrap();
+
+    let postcard = codec::encode_with(EventCodec::PostcardV1, &sample_event()).unwrap();
+    fs::write(root.join("codec/postcard_v1_claim_asserted.bin"), &postcard).unwrap();
 
     let mut segment = Vec::new();
     segment.extend_from_slice(&encode_segment_header(0));
