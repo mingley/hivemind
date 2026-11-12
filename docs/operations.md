@@ -150,7 +150,7 @@ daemon (publish no HTTP ports in that case; use a volume for `HIVEMIND_DIR`).
 
 ## Status framing
 
-Ops packaging (CI gates, release artifacts, `/healthz` `/readyz` `/metrics`,
+Ops packaging (CI gates, release artifacts, `/health` plus `/readyz` `/metrics`,
 structured logs, Dockerfile) has landed. Product gaps that remain out of scope
 for this doc: HA, authenticated multi-tenant isolation hardening beyond bearer
 OAuth, and proving local MCP under restrictive sandboxes. Local MCP setup:
