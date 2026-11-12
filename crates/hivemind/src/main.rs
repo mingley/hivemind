@@ -124,9 +124,15 @@ struct ServeArgs {
     /// HTTP listen address (also serves MCP Streamable HTTP at `/mcp`).
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: String,
-    /// Bootstrap bearer token and OAuth client secret / signing key.
+    /// Bootstrap / admin bearer (must differ from client secret and signing key).
     #[arg(long, env = "HIVEMIND_TOKEN")]
     token: String,
+    /// OAuth confidential client secret (must differ from bootstrap and signing key).
+    #[arg(long, env = "HIVEMIND_OAUTH_CLIENT_SECRET")]
+    oauth_client_secret: String,
+    /// HMAC signing key for access tokens (must differ from bootstrap and client secret).
+    #[arg(long, env = "HIVEMIND_SIGNING_KEY")]
+    signing_key: String,
     /// Tenant partition backing `/mcp`.
     #[arg(long, default_value = "default", env = "HIVEMIND_DEFAULT_TENANT")]
     default_tenant: String,
@@ -136,6 +142,17 @@ struct ServeArgs {
     /// OAuth 2.1 client_id for the pre-registered confidential client.
     #[arg(long, default_value = "hivemind-cli", env = "HIVEMIND_OAUTH_CLIENT_ID")]
     oauth_client_id: String,
+    /// Access-token TTL in seconds (short TTL; refresh remains optional/P1).
+    #[arg(
+        long,
+        default_value_t = hivemind::oauth::DEFAULT_ACCESS_TOKEN_TTL_SECS,
+        env = "HIVEMIND_ACCESS_TOKEN_TTL_SECS"
+    )]
+    access_token_ttl_secs: u64,
+    /// Refuse start unless HIVEMIND_PUBLIC_BASE is https:// (reverse-proxy TLS).
+    /// Also honored via `HIVEMIND_REQUIRE_TLS=1|true|yes`.
+    #[arg(long, default_value_t = false)]
+    require_tls: bool,
     /// gRPC listen address [default: same host as --listen, port 8788].
     #[arg(long, env = "HIVEMIND_GRPC_LISTEN")]
     grpc_listen: Option<String>,
@@ -437,6 +454,16 @@ struct LogArgs {
     limit: usize,
 }
 
+fn env_flag_true(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        }
+        Err(_) => false,
+    }
+}
+
 fn parse_pair(text: &str) -> Result<(String, String), String> {
     let (key, value) = text
         .split_once('=')
@@ -500,14 +527,19 @@ fn run(cli: Cli) -> Result<()> {
                 Some(std::net::SocketAddr::new(listen.ip(), 8788))
             };
             let rt = tokio::runtime::Runtime::new()?;
+            let require_tls = args.require_tls || env_flag_true("HIVEMIND_REQUIRE_TLS");
             return rt.block_on(hivemind::http::serve(hivemind::http::ServeArgs {
                 root,
                 listen,
                 token: args.token.clone(),
+                oauth_client_secret: args.oauth_client_secret.clone(),
+                signing_key: args.signing_key.clone(),
                 no_fsync: args.no_fsync || cli.no_fsync,
                 default_tenant: args.default_tenant.clone(),
                 public_base: args.public_base.clone(),
                 oauth_client_id: args.oauth_client_id.clone(),
+                access_token_ttl_secs: args.access_token_ttl_secs,
+                require_tls,
                 grpc_listen,
             }));
         }

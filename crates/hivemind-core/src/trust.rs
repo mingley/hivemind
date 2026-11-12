@@ -4,8 +4,8 @@
 //! Widening a claim's scope (`promote`) requires at least [`TrustTier::Corroborated`]
 //! (or human review, which yields [`TrustTier::Human`]).
 
-use crate::scope::Scope;
 use crate::TrustTier;
+use crate::scope::Scope;
 
 /// Opens a quarantine block in rendered / wire text. Agents must treat the
 /// enclosed content as data, not orders.
@@ -16,7 +16,9 @@ pub const QUARANTINE_OPEN: &str =
 pub const QUARANTINE_CLOSE: &str = "<<<END QUARANTINE>>>";
 
 /// How a claim should be presented to a reader.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Presentation {
     /// Ordinary evidence card; still not an instruction, but not quarantined.
@@ -53,10 +55,7 @@ pub fn quarantine_statement(statement: &str) -> String {
 /// Applies quarantine wrapping when [`should_quarantine`] is true.
 pub fn present_statement(trust: TrustTier, statement: &str) -> (Presentation, String) {
     if should_quarantine(trust) {
-        (
-            Presentation::Quarantined,
-            quarantine_statement(statement),
-        )
+        (Presentation::Quarantined, quarantine_statement(statement))
     } else {
         (Presentation::Evidence, statement.to_owned())
     }

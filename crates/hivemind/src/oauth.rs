@@ -1,4 +1,4 @@
-//! Minimal OAuth 2.1 authorization server for the shared service (M5).
+//! Minimal OAuth 2.1 authorization server for the shared service (M5+).
 //!
 //! Supports:
 //! - Authorization Server Metadata ([RFC 8414](https://datatracker.ietf.org/doc/html/rfc8414))
@@ -6,8 +6,12 @@
 //! - `client_credentials` (machine agents)
 //! - `authorization_code` + PKCE S256 (interactive / MCP clients)
 //!
-//! Access tokens are HMAC-BLAKE3 sealed JSON claims. The shared `--token` remains
-//! accepted as a bootstrap/admin bearer so ops scripts keep working.
+//! Access tokens are HMAC-BLAKE3 sealed JSON claims with a short TTL (default
+//! 5 minutes). Bootstrap bearer, OAuth client secret, and signing key are
+//! **separate** secrets — do not reuse the bootstrap token as the HMAC key.
+//!
+//! Refresh tokens, external IdP federation, and dynamic client registration
+//! remain out of scope (P1).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -20,19 +24,25 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const TOKEN_TTL_SECS: u64 = 3600;
+/// Default access-token lifetime for the shared service (short TTL).
+pub const DEFAULT_ACCESS_TOKEN_TTL_SECS: u64 = 300;
 const CODE_TTL_SECS: u64 = 300;
+/// Principal attributed to the bootstrap/admin bearer on the shared path.
+pub const BOOTSTRAP_PRINCIPAL: &str = "bootstrap";
 
 #[derive(Clone, Debug)]
 pub struct OAuthConfig {
-    /// Issuer / public base URL (no trailing slash), e.g. `http://127.0.0.1:8787`.
+    /// Issuer / public base URL (no trailing slash), e.g. `https://memory.example`.
     pub issuer: String,
     pub client_id: String,
+    /// Confidential-client secret (not the bootstrap bearer).
     pub client_secret: String,
-    /// Signing key material (usually the same secret as the bootstrap bearer).
+    /// HMAC signing key for access tokens (not the bootstrap bearer).
     pub signing_key: String,
     /// Resource identifier advertised for MCP (usually `{issuer}/mcp`).
     pub resource: String,
+    /// Access-token TTL in seconds (short by default).
+    pub access_token_ttl_secs: u64,
 }
 
 #[derive(Clone)]
@@ -66,6 +76,15 @@ struct AccessClaims {
     iss: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resource: Option<String>,
+}
+
+/// Authenticated caller derived from a bearer credential.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthIdentity {
+    /// Principal used for write attribution on the shared path.
+    pub principal: String,
+    /// True when the shared bootstrap/admin bearer was used.
+    pub bootstrap: bool,
 }
 
 impl OAuthState {
@@ -124,7 +143,6 @@ impl OAuthState {
             .codes
             .lock()
             .map_err(|_| anyhow::anyhow!("oauth code lock poisoned"))?;
-        let _ = code_challenge_method; // validated above as S256
         guard.insert(
             code.clone(),
             AuthCode {
@@ -147,7 +165,7 @@ impl OAuthState {
                     bail!("invalid client credentials");
                 }
                 let token = self.issue_access_token(&client_id, form.resource.as_deref())?;
-                Ok(token_response(&token))
+                Ok(token_response(&token, self.config.access_token_ttl_secs))
             }
             "authorization_code" => {
                 let code = form
@@ -189,7 +207,7 @@ impl OAuthState {
                 }
                 let resource = form.resource.as_deref().or(record.resource.as_deref());
                 let token = self.issue_access_token(&client_id, resource)?;
-                Ok(token_response(&token))
+                Ok(token_response(&token, self.config.access_token_ttl_secs))
             }
             other => bail!("unsupported grant_type: {other}"),
         }
@@ -199,7 +217,7 @@ impl OAuthState {
         let now = now_secs();
         let claims = AccessClaims {
             sub: sub.to_owned(),
-            exp: now + TOKEN_TTL_SECS,
+            exp: now + self.config.access_token_ttl_secs,
             iat: now,
             iss: self.config.issuer.clone(),
             resource: resource.map(str::to_owned),
@@ -208,9 +226,15 @@ impl OAuthState {
     }
 
     /// Accept either a sealed OAuth access token or the bootstrap shared bearer.
-    pub fn validate_bearer(&self, token: &str, bootstrap: &str) -> Result<()> {
+    ///
+    /// Returns the principal that must be used for write attribution on the
+    /// shared path (`claims.sub` or [`BOOTSTRAP_PRINCIPAL`]).
+    pub fn authenticate(&self, token: &str, bootstrap: &str) -> Result<AuthIdentity> {
         if token == bootstrap {
-            return Ok(());
+            return Ok(AuthIdentity {
+                principal: BOOTSTRAP_PRINCIPAL.to_owned(),
+                bootstrap: true,
+            });
         }
         let claims = open_token(token, &self.config.signing_key)?;
         if claims.exp < now_secs() {
@@ -219,7 +243,18 @@ impl OAuthState {
         if claims.iss != self.config.issuer {
             bail!("access token issuer mismatch");
         }
-        Ok(())
+        if claims.sub.trim().is_empty() {
+            bail!("access token missing subject");
+        }
+        Ok(AuthIdentity {
+            principal: claims.sub,
+            bootstrap: false,
+        })
+    }
+
+    /// Back-compat wrapper: validate without returning identity.
+    pub fn validate_bearer(&self, token: &str, bootstrap: &str) -> Result<()> {
+        self.authenticate(token, bootstrap).map(|_| ())
     }
 }
 
@@ -267,11 +302,11 @@ pub fn merge_basic_into_form(form: &mut TokenForm, basic: Option<(String, String
     }
 }
 
-fn token_response(access_token: &str) -> Value {
+fn token_response(access_token: &str, expires_in: u64) -> Value {
     json!({
         "access_token": access_token,
         "token_type": "Bearer",
-        "expires_in": TOKEN_TTL_SECS,
+        "expires_in": expires_in,
         "scope": "hivemind",
     })
 }
@@ -327,6 +362,28 @@ fn random_token(nbytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(buf)
 }
 
+/// Transport policy for the shared HTTP/gRPC listeners.
+///
+/// Hivemind does not terminate TLS in-process by default. Production
+/// deployments MUST terminate TLS at a reverse proxy (or enable an equivalent
+/// external terminator) and set `HIVEMIND_REQUIRE_TLS=1` so plaintext public
+/// bases are refused at process start.
+pub fn validate_transport(require_tls: bool, public_base: &str) -> Result<()> {
+    let base = public_base.trim();
+    if base.is_empty() {
+        bail!("public base URL is required");
+    }
+    if require_tls {
+        let lower = base.to_ascii_lowercase();
+        if !lower.starts_with("https://") {
+            bail!(
+                "HIVEMIND_REQUIRE_TLS=1 refuses plaintext: set HIVEMIND_PUBLIC_BASE to an https:// URL (terminate TLS at the reverse proxy)"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,26 +392,55 @@ mod tests {
         OAuthState::new(OAuthConfig {
             issuer: "http://127.0.0.1:8787".into(),
             client_id: "hivemind-cli".into(),
-            client_secret: "secret".into(),
-            signing_key: "secret".into(),
+            client_secret: "client-secret".into(),
+            signing_key: "signing-key".into(),
             resource: "http://127.0.0.1:8787/mcp".into(),
+            access_token_ttl_secs: DEFAULT_ACCESS_TOKEN_TTL_SECS,
         })
     }
 
     #[test]
-    fn client_credentials_round_trip() {
+    fn secrets_are_independent() {
         let s = state();
         let form = TokenForm {
             grant_type: "client_credentials".into(),
             client_id: Some("hivemind-cli".into()),
-            client_secret: Some("secret".into()),
+            client_secret: Some("client-secret".into()),
             ..TokenForm::default()
         };
         let resp = s.exchange_token(&form).unwrap();
         let token = resp["access_token"].as_str().unwrap();
-        s.validate_bearer(token, "bootstrap").unwrap();
-        assert!(s.validate_bearer("nope", "bootstrap").is_err());
-        s.validate_bearer("bootstrap", "bootstrap").unwrap();
+        assert_eq!(resp["expires_in"], DEFAULT_ACCESS_TOKEN_TTL_SECS);
+
+        // Access token verifies with signing key; bootstrap is a different secret.
+        let id = s.authenticate(token, "bootstrap-only").unwrap();
+        assert_eq!(id.principal, "hivemind-cli");
+        assert!(!id.bootstrap);
+
+        // Bootstrap bearer is not the client secret and is not a sealed token.
+        assert!(s.authenticate("client-secret", "bootstrap-only").is_err());
+        let boot = s.authenticate("bootstrap-only", "bootstrap-only").unwrap();
+        assert!(boot.bootstrap);
+        assert_eq!(boot.principal, BOOTSTRAP_PRINCIPAL);
+
+        // Wrong signing key cannot open the token.
+        let other = OAuthState::new(OAuthConfig {
+            signing_key: "other-signing-key".into(),
+            ..s.config.clone()
+        });
+        assert!(other.authenticate(token, "bootstrap-only").is_err());
+    }
+
+    #[test]
+    fn bootstrap_does_not_work_as_client_secret() {
+        let s = state();
+        let form = TokenForm {
+            grant_type: "client_credentials".into(),
+            client_id: Some("hivemind-cli".into()),
+            client_secret: Some("bootstrap-only".into()),
+            ..TokenForm::default()
+        };
+        assert!(s.exchange_token(&form).is_err());
     }
 
     #[test]
@@ -374,7 +460,7 @@ mod tests {
         let form = TokenForm {
             grant_type: "authorization_code".into(),
             client_id: Some("hivemind-cli".into()),
-            client_secret: Some("secret".into()),
+            client_secret: Some("client-secret".into()),
             code: Some(code),
             redirect_uri: Some("http://127.0.0.1/cb".into()),
             code_verifier: Some(verifier.into()),
@@ -382,7 +468,16 @@ mod tests {
             ..TokenForm::default()
         };
         let resp = s.exchange_token(&form).unwrap();
-        s.validate_bearer(resp["access_token"].as_str().unwrap(), "x")
+        let id = s
+            .authenticate(resp["access_token"].as_str().unwrap(), "x")
             .unwrap();
+        assert_eq!(id.principal, "hivemind-cli");
+    }
+
+    #[test]
+    fn require_tls_refuses_plaintext_public_base() {
+        assert!(validate_transport(true, "http://127.0.0.1:8787").is_err());
+        assert!(validate_transport(true, "https://memory.example").is_ok());
+        assert!(validate_transport(false, "http://127.0.0.1:8787").is_ok());
     }
 }

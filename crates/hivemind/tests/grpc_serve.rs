@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use hivemind::grpc::{self, GrpcArgs};
-use hivemind::oauth::{OAuthConfig, OAuthState};
+use hivemind::oauth::{DEFAULT_ACCESS_TOKEN_TTL_SECS, OAuthConfig, OAuthState};
 use tempfile::tempdir;
 use tonic::Request;
 use tonic::metadata::MetadataValue;
@@ -15,14 +15,15 @@ async fn grpc_hello_and_rpc_with_bearer() {
     let addr = listener.local_addr().unwrap();
     drop(listener);
 
-    let token = "grpc-token".to_owned();
+    let token = "grpc-bootstrap".to_owned();
     let issuer = format!("http://{addr}");
     let oauth = OAuthState::new(OAuthConfig {
         issuer: issuer.clone(),
         client_id: "hivemind-cli".into(),
-        client_secret: token.clone(),
-        signing_key: token.clone(),
+        client_secret: "grpc-client-secret".into(),
+        signing_key: "grpc-signing-key".into(),
         resource: format!("{issuer}/mcp"),
+        access_token_ttl_secs: DEFAULT_ACCESS_TOKEN_TTL_SECS,
     });
 
     let serve = tokio::spawn(grpc::serve(GrpcArgs {
@@ -61,7 +62,7 @@ async fn grpc_hello_and_rpc_with_bearer() {
             "statement": "from grpc",
             "kind": "fact",
             "scope": "project:acme/api",
-            "actor": { "principal": "tester" }
+            "actor": { "principal": "spoofed" }
         })
         .to_string(),
     });

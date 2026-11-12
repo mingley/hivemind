@@ -59,6 +59,21 @@ impl Service {
     }
 
     pub fn dispatch(&self, method: &str, params: Value) -> Result<Value> {
+        self.dispatch_with_principal(method, params, None)
+    }
+
+    /// Shared-service dispatch: when `principal` is set, it overrides any
+    /// client-supplied / env TOFU actor principal (token subject wins).
+    pub fn dispatch_with_principal(
+        &self,
+        method: &str,
+        params: Value,
+        principal: Option<&str>,
+    ) -> Result<Value> {
+        let params = match principal {
+            Some(p) => force_actor_principal(params, p),
+            None => params,
+        };
         match method {
             "hello" | "ping" => Ok(serde_json::to_value(self.hello())?),
             "remember" => self.remember(params),
@@ -255,9 +270,7 @@ impl Service {
         let p: PromoteParams = serde_json::from_value(params)?;
         let actor = self.actor_from(&p.actor);
         let id = self.store.resolve(&p.id)?;
-        let receipt = self
-            .store
-            .promote(&actor, id, p.scope, p.idempotency_key)?;
+        let receipt = self.store.promote(&actor, id, p.scope, p.idempotency_key)?;
         Ok(serde_json::to_value(receipt)?)
     }
 
@@ -485,4 +498,17 @@ struct ChangesParams {
     from: u64,
     limit: Option<usize>,
     filter: Option<ChangesFilterParams>,
+}
+
+/// Overwrite `params.actor.principal` so shared-path clients cannot spoof identity.
+fn force_actor_principal(mut params: Value, principal: &str) -> Value {
+    let actor = params
+        .as_object_mut()
+        .map(|obj| obj.entry("actor").or_insert_with(|| json!({})));
+    if let Some(Value::Object(map)) = actor {
+        map.insert("principal".to_owned(), Value::String(principal.to_owned()));
+    } else if let Some(obj) = params.as_object_mut() {
+        obj.insert("actor".to_owned(), json!({ "principal": principal }));
+    }
+    params
 }

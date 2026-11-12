@@ -829,8 +829,7 @@ impl Store {
         to: Scope,
         idempotency_key: Option<String>,
     ) -> Result<Receipt> {
-        to.validate()
-            .map_err(|e| Error::Invalid(e.to_string()))?;
+        to.validate().map_err(|e| Error::Invalid(e.to_string()))?;
         let (offset, from_scope, trust) = {
             let state = self.state.read();
             let row = state

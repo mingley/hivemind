@@ -30,6 +30,9 @@ enum Backend {
 #[derive(Clone)]
 pub struct HiveMcp {
     backend: Backend,
+    /// When set (shared Streamable HTTP), write attribution uses this principal
+    /// instead of env TOFU.
+    forced_principal: Option<String>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -160,14 +163,25 @@ impl HiveMcp {
     fn new(client: Client) -> Self {
         Self {
             backend: Backend::Daemon(Arc::new(Mutex::new(client))),
+            forced_principal: None,
             tool_router: Self::tool_router(),
         }
     }
 
-    /// In-process MCP handler bound to an open store (Streamable HTTP / tests).
+    /// In-process MCP handler bound to an open store (local tests).
     pub fn from_service(service: Arc<Service>) -> Self {
         Self {
             backend: Backend::Local(service),
+            forced_principal: None,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Shared Streamable HTTP: force write principal (OAuth client id / token sub).
+    pub fn from_service_with_principal(service: Arc<Service>, principal: String) -> Self {
+        Self {
+            backend: Backend::Local(service),
+            forced_principal: Some(principal),
             tool_router: Self::tool_router(),
         }
     }
@@ -183,7 +197,7 @@ impl HiveMcp {
                     .map_err(|e| McpError::internal_error(format!("{e:#}"), None))
             }
             Backend::Local(service) => service
-                .dispatch(method, params)
+                .dispatch_with_principal(method, params, self.forced_principal.as_deref())
                 .map_err(|e| McpError::internal_error(format!("{e:#}"), None)),
         }
     }

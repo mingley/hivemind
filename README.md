@@ -57,6 +57,7 @@ into a shared service.
 | 08 | [Hippocampal design](docs/08-hippocampal-design.md) | Which ideas from hippocampal research become mechanisms, and how each is tested |
 | — | [MCP setup](docs/setup-mcp.md) | Build `hivemind` / `hivemindd`, configure Claude Code, Codex CLI, and Copilot CLI |
 | — | [Operations](docs/operations.md) | Run, backup, sync, health/metrics, auth env, release binaries, container |
+| — | [SECURITY.md](SECURITY.md) | Shared-service threat model: secrets, TLS proxy contract, tenants, tokens |
 | — | [hivebench scenarios](scenarios/README.md) | M2 seed scenarios for offline retrieval and harness dry-runs |
 
 The [`research/`](research/) directory holds the sourced research reports these

@@ -254,11 +254,13 @@ model weights file (plug any `Embedder` in), ANN, or F4 online quality wins.
 - **OAuth 2.1:** authorization-server + protected-resource metadata
   (`/.well-known/oauth-*`); `/oauth/authorize` (auth code + PKCE S256);
   `/oauth/token` (`authorization_code`, `client_credentials`); sealed HMAC
-  access tokens; `WWW-Authenticate` with `resource_metadata` on 401. The
-  shared `--token` / `HIVEMIND_TOKEN` remains a bootstrap/admin bearer and the
-  pre-registered client secret. **Scoped deferral:** no external IdP
-  federation, no dynamic client registration, no refresh tokens — enough for
-  laptop/team agents talking to this AS, not a full identity platform.
+  access tokens with a short TTL; `WWW-Authenticate` with `resource_metadata`
+  on 401. Bootstrap bearer, OAuth client secret, and signing key are
+  **separate** (`HIVEMIND_TOKEN` / `HIVEMIND_OAUTH_CLIENT_SECRET` /
+  `HIVEMIND_SIGNING_KEY`). Shared-path write attribution uses the token
+  subject (not env TOFU). **Scoped deferral (P1):** no external IdP
+  federation, no dynamic client registration, no refresh tokens — short TTL
+  + client_credentials cover laptop/team agents talking to this AS.
 - **gRPC:** tonic `hivemind.v1.Hivemind` (`Hello`, `Rpc`, `ChangesSince`) on
   `--grpc-listen` (default port 8788); same bearer/OAuth validation.
 - **Laptop sync helpers:** append-only upload queue + pull cursor JSON under

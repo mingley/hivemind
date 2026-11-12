@@ -23,6 +23,7 @@ ENV HIVEMIND_ROOT=/var/lib/hivemind \
     RUST_LOG=info
 EXPOSE 8787 8788
 VOLUME ["/var/lib/hivemind"]
-# Shared service; set HIVEMIND_TOKEN at runtime.
+# Shared service; set distinct HIVEMIND_TOKEN, HIVEMIND_OAUTH_CLIENT_SECRET,
+# and HIVEMIND_SIGNING_KEY at runtime (see SECURITY.md).
 ENTRYPOINT ["hivemind"]
 CMD ["serve", "--listen", "0.0.0.0:8787", "--root", "/var/lib/hivemind"]

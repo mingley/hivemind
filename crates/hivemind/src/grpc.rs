@@ -80,7 +80,7 @@ impl Hivemind for GrpcState {
         &self,
         request: Request<HelloRequest>,
     ) -> Result<Response<HelloResponse>, Status> {
-        self.authorize(&request)?;
+        let _identity = self.authorize(&request)?;
         let tenant = request.into_inner().tenant;
         let service = self.service_for(&tenant)?;
         let json =
@@ -89,7 +89,7 @@ impl Hivemind for GrpcState {
     }
 
     async fn rpc(&self, request: Request<RpcRequest>) -> Result<Response<RpcResponse>, Status> {
-        self.authorize(&request)?;
+        let identity = self.authorize(&request)?;
         let inner = request.into_inner();
         let service = self.service_for(&inner.tenant)?;
         let params: Value = if inner.params_json.trim().is_empty() {
@@ -99,7 +99,7 @@ impl Hivemind for GrpcState {
                 .map_err(|e| Status::invalid_argument(format!("params_json: {e}")))?
         };
         let value = service
-            .dispatch(&inner.method, params)
+            .dispatch_with_principal(&inner.method, params, Some(&identity.principal))
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let json = serde_json::to_string(&value).map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(RpcResponse { json }))
@@ -109,7 +109,7 @@ impl Hivemind for GrpcState {
         &self,
         request: Request<ChangesSinceRequest>,
     ) -> Result<Response<ChangesSinceResponse>, Status> {
-        self.authorize(&request)?;
+        let _identity = self.authorize(&request)?;
         let inner = request.into_inner();
         let service = self.service_for(&inner.tenant)?;
         let limit = if inner.limit == 0 {
@@ -129,7 +129,7 @@ impl Hivemind for GrpcState {
 }
 
 impl GrpcState {
-    fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
+    fn authorize<T>(&self, request: &Request<T>) -> Result<crate::oauth::AuthIdentity, Status> {
         let header = request
             .metadata()
             .get("authorization")
@@ -137,7 +137,7 @@ impl GrpcState {
         let token =
             sync::bearer_token(header).map_err(|e| Status::unauthenticated(e.to_string()))?;
         self.oauth
-            .validate_bearer(token, &self.token)
+            .authenticate(token, &self.token)
             .map_err(|e| Status::unauthenticated(e.to_string()))
     }
 

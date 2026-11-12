@@ -1,4 +1,4 @@
-//! Shared-service HTTP API (M5): tenants, OAuth 2.1, MCP Streamable HTTP, backup.
+//! Shared-service HTTP API (M5+): tenants, OAuth 2.1, MCP Streamable HTTP, backup.
 //!
 //! Endpoints:
 //! - `/health` — liveness (process up; existing probe, kept stable)
@@ -8,6 +8,11 @@
 //! - `/.well-known/oauth-*` and `/oauth/*` — OAuth 2.1 AS + protected resource
 //! - `/mcp` — MCP Streamable HTTP for `--default-tenant`
 //! - `/v1/tenants…` — JSON API (bearer: OAuth access token or bootstrap token)
+//!
+//! Transport: this process speaks plaintext HTTP. Production deployments MUST
+//! terminate TLS at a reverse proxy (or equivalent) and set
+//! `HIVEMIND_REQUIRE_TLS=1` so a non-`https://` public base is refused. See
+//! repository root `SECURITY.md`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -17,7 +22,7 @@ use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow};
 use axum::Router;
-use axum::extract::{Form, Path as AxumPath, Query, State};
+use axum::extract::{Extension, Form, Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -31,7 +36,10 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use crate::mcp::HiveMcp;
-use crate::oauth::{self, OAuthConfig, OAuthState, TokenForm};
+use crate::oauth::{
+    self, AuthIdentity, DEFAULT_ACCESS_TOKEN_TTL_SECS, OAuthConfig, OAuthState, TokenForm,
+    validate_transport,
+};
 use crate::obs;
 use crate::service::Service;
 use crate::sync;
@@ -41,14 +49,22 @@ use crate::tenant::{self, ensure_tenant_dir, list_tenants};
 pub struct ServeArgs {
     pub root: PathBuf,
     pub listen: SocketAddr,
-    /// Bootstrap / admin bearer (also used as OAuth client secret + signing key).
+    /// Bootstrap / admin bearer (not the OAuth client secret or signing key).
     pub token: String,
+    /// Pre-registered confidential client secret.
+    pub oauth_client_secret: String,
+    /// HMAC key for sealing access tokens.
+    pub signing_key: String,
     pub no_fsync: bool,
     /// Tenant backing `/mcp`.
     pub default_tenant: String,
     /// Public base URL for OAuth metadata (defaults to `http://{listen}`).
     pub public_base: Option<String>,
     pub oauth_client_id: String,
+    /// Access-token TTL seconds (short by default).
+    pub access_token_ttl_secs: u64,
+    /// When true, refuse to start unless `public_base` is `https://`.
+    pub require_tls: bool,
     /// Optional gRPC listen address (spawned alongside HTTP).
     pub grpc_listen: Option<SocketAddr>,
 }
@@ -65,9 +81,7 @@ struct AppState {
 pub async fn serve(args: ServeArgs) -> Result<()> {
     obs::init_tracing();
     obs::ensure_registered();
-    if args.token.trim().is_empty() {
-        return Err(anyhow!("HIVEMIND_TOKEN / --token must be non-empty"));
-    }
+    validate_serve_secrets(&args)?;
     std::fs::create_dir_all(args.root.join("tenants"))?;
 
     let issuer = args
@@ -75,12 +89,15 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| format!("http://{}", args.listen));
     let issuer = issuer.trim_end_matches('/').to_owned();
+    validate_transport(args.require_tls, &issuer)?;
+
     let oauth = OAuthState::new(OAuthConfig {
         issuer: issuer.clone(),
         client_id: args.oauth_client_id.clone(),
-        client_secret: args.token.clone(),
-        signing_key: args.token.clone(),
+        client_secret: args.oauth_client_secret.clone(),
+        signing_key: args.signing_key.clone(),
         resource: format!("{issuer}/mcp"),
+        access_token_ttl_secs: args.access_token_ttl_secs,
     });
 
     let state = Arc::new(AppState {
@@ -100,10 +117,19 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     let default_service = state
         .service_for(&args.default_tenant)
         .map_err(|e| anyhow!(e.message))?;
+    // Streamable MCP cannot see per-request auth extensions; attribute writes
+    // to the pre-registered OAuth client_id (not env TOFU).
+    let mcp_principal = args.oauth_client_id.clone();
     let mcp = StreamableHttpService::new(
         {
             let default_service = default_service.clone();
-            move || Ok(HiveMcp::from_service(default_service.clone()))
+            let mcp_principal = mcp_principal.clone();
+            move || {
+                Ok(HiveMcp::from_service_with_principal(
+                    default_service.clone(),
+                    mcp_principal.clone(),
+                ))
+            }
         },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default().with_allowed_hosts([
@@ -176,9 +202,44 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         root = %args.root.display(),
         tenant = %args.default_tenant,
         issuer = %issuer,
+        require_tls = args.require_tls,
         "hivemind HTTP service listening"
     );
     axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Reject empty or accidentally dual-used secrets before bind.
+pub fn validate_serve_secrets(args: &ServeArgs) -> Result<()> {
+    if args.token.trim().is_empty() {
+        return Err(anyhow!("HIVEMIND_TOKEN / --token must be non-empty"));
+    }
+    if args.oauth_client_secret.trim().is_empty() {
+        return Err(anyhow!(
+            "HIVEMIND_OAUTH_CLIENT_SECRET / --oauth-client-secret must be non-empty"
+        ));
+    }
+    if args.signing_key.trim().is_empty() {
+        return Err(anyhow!(
+            "HIVEMIND_SIGNING_KEY / --signing-key must be non-empty"
+        ));
+    }
+    if args.token == args.oauth_client_secret {
+        return Err(anyhow!(
+            "bootstrap token and OAuth client secret must be distinct"
+        ));
+    }
+    if args.token == args.signing_key {
+        return Err(anyhow!("bootstrap token and signing key must be distinct"));
+    }
+    if args.oauth_client_secret == args.signing_key {
+        return Err(anyhow!(
+            "OAuth client secret and signing key must be distinct"
+        ));
+    }
+    if args.access_token_ttl_secs == 0 {
+        return Err(anyhow!("access token TTL must be > 0"));
+    }
     Ok(())
 }
 
@@ -194,15 +255,18 @@ async fn http_metrics(request: axum::extract::Request, next: Next) -> Response {
 async fn require_bearer(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: middleware::Next,
 ) -> Response {
     let header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
     match sync::bearer_token(header) {
-        Ok(token) => match state.oauth.validate_bearer(token, &state.token) {
-            Ok(()) => next.run(request).await,
+        Ok(token) => match state.oauth.authenticate(token, &state.token) {
+            Ok(identity) => {
+                request.extensions_mut().insert(identity);
+                next.run(request).await
+            }
             Err(e) => unauthorized(&state, e.to_string()),
         },
         Err(e) => unauthorized(&state, e.to_string()),
@@ -381,12 +445,13 @@ struct RpcBody {
 
 async fn tenant_rpc(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<AuthIdentity>,
     AxumPath(tenant): AxumPath<String>,
     Json(body): Json<RpcBody>,
 ) -> Result<Json<Value>, ApiError> {
     let service = state.service_for(&tenant)?;
     let value = service
-        .dispatch(&body.method, body.params)
+        .dispatch_with_principal(&body.method, body.params, Some(&identity.principal))
         .map_err(ApiError::from)?;
     obs::set_log_offset(&tenant, service.store().next_offset());
     Ok(Json(value))
@@ -509,4 +574,9 @@ pub fn open_tenant_store(root: &Path, tenant: &str, durability: Durability) -> R
         },
     )
     .map_err(Into::into)
+}
+
+/// Helper for tests / docs: default short TTL.
+pub fn default_access_token_ttl_secs() -> u64 {
+    DEFAULT_ACCESS_TOKEN_TTL_SECS
 }

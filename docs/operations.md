@@ -40,13 +40,23 @@ Daemon, `hivemind serve`, and gRPC all call the same tracing init.
 | Variable | Purpose | Default |
 |---|---|---|
 | `HIVEMIND_ROOT` | Multi-tenant root (`tenants/<id>/`) | `~/.hivemind` |
-| `HIVEMIND_TOKEN` | Bootstrap bearer + OAuth client secret / signing key (**required**) | — |
+| `HIVEMIND_TOKEN` | Bootstrap / admin bearer (**required**; must differ from the other two secrets) | — |
+| `HIVEMIND_OAUTH_CLIENT_SECRET` | OAuth confidential client secret (**required**; distinct) | — |
+| `HIVEMIND_SIGNING_KEY` | Access-token HMAC signing key (**required**; distinct) | — |
 | `HIVEMIND_DEFAULT_TENANT` | Tenant behind `/mcp` | `default` |
 | `HIVEMIND_PUBLIC_BASE` | Public base URL in OAuth metadata | `http://{listen}` |
 | `HIVEMIND_OAUTH_CLIENT_ID` | Pre-registered confidential client id | `hivemind-cli` |
+| `HIVEMIND_ACCESS_TOKEN_TTL_SECS` | Access-token lifetime (short TTL) | `300` |
+| `HIVEMIND_REQUIRE_TLS` | `1`/`true`/`yes` — refuse start unless `PUBLIC_BASE` is `https://` | unset |
 | `HIVEMIND_GRPC_LISTEN` | gRPC listen address | same host as HTTP, port `8788` |
 
-Flags: `--listen` (default `127.0.0.1:8787`), `--no-grpc`, `--token`, `--root`.
+Flags: `--listen` (default `127.0.0.1:8787`), `--no-grpc`, `--token`,
+`--oauth-client-secret`, `--signing-key`, `--require-tls`, `--root`.
+
+**TLS:** `hivemind serve` speaks plaintext HTTP/gRPC. Production MUST terminate
+TLS at a reverse proxy (or equivalent), set
+`HIVEMIND_PUBLIC_BASE=https://…`, and set `HIVEMIND_REQUIRE_TLS=1`. See
+[SECURITY.md](../SECURITY.md).
 
 ## Health and metrics (HTTP)
 
@@ -78,16 +88,23 @@ curl -sS "http://127.0.0.1:8787/metrics"
 
 ```bash
 export HIVEMIND_TOKEN="$(openssl rand -hex 32)"
+export HIVEMIND_OAUTH_CLIENT_SECRET="$(openssl rand -hex 32)"
+export HIVEMIND_SIGNING_KEY="$(openssl rand -hex 32)"
 export HIVEMIND_ROOT="$HOME/.hivemind"
 cargo build --release -p hivemind
 ./target/release/hivemind serve --listen 127.0.0.1:8787 --root "$HIVEMIND_ROOT"
+# production-ish:
+# export HIVEMIND_PUBLIC_BASE=https://memory.example
+# export HIVEMIND_REQUIRE_TLS=1
 # optional JSON logs:
 # HIVEMIND_LOG_FORMAT=json RUST_LOG=info ./target/release/hivemind serve ...
 ```
 
 Authenticate JSON API / MCP with `Authorization: Bearer $HIVEMIND_TOKEN`, or
-obtain an OAuth access token via `/oauth/token` (client credentials / auth code
-+ PKCE). See M5 notes and [setup-mcp.md](setup-mcp.md) for agent wiring.
+obtain an OAuth access token via `/oauth/token` using
+`HIVEMIND_OAUTH_CLIENT_SECRET` (client credentials / auth code + PKCE; short
+TTL). Shared-path write attribution uses the token subject, not env TOFU. See
+[SECURITY.md](../SECURITY.md) and [setup-mcp.md](setup-mcp.md).
 
 ## Backup and sync
 
@@ -143,14 +160,17 @@ cargo build --release --locked -p hivemind
 docker build -t hivemind:local .
 docker run --rm -p 8787:8787 -p 8788:8788 \
   -e HIVEMIND_TOKEN="$(openssl rand -hex 32)" \
+  -e HIVEMIND_OAUTH_CLIENT_SECRET="$(openssl rand -hex 32)" \
+  -e HIVEMIND_SIGNING_KEY="$(openssl rand -hex 32)" \
   -e HIVEMIND_LOG_FORMAT=json \
   -v hivemind-data:/var/lib/hivemind \
   hivemind:local
 ```
 
 The image entrypoint is `hivemind serve --listen 0.0.0.0:8787 --root /var/lib/hivemind`.
-Override with e.g. `docker run … hivemind:local daemon` for a single-store
-daemon (publish no HTTP ports in that case; use a volume for `HIVEMIND_DIR`).
+Pass distinct bootstrap / client-secret / signing-key env vars. Override with
+e.g. `docker run … hivemind:local daemon` for a single-store daemon (publish no
+HTTP ports in that case; use a volume for `HIVEMIND_DIR`).
 
 ## Erasure / forget (privacy SLA)
 
