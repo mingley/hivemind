@@ -2,7 +2,7 @@
 # See docs/operations.md for run instructions.
 # protoc is required: crates/hivemind/build.rs compiles gRPC stubs via tonic.
 
-FROM rust:1.89-bookworm AS build
+FROM rust:1.100-bookworm AS build
 WORKDIR /src
 RUN apt-get update \
     && apt-get install -y --no-install-recommends protobuf-compiler \

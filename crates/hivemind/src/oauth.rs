@@ -324,8 +324,7 @@ impl OAuthState {
             "scopes_supported": ["hivemind"],
         });
         if self.config.dcr_enabled {
-            meta["registration_endpoint"] =
-                json!(format!("{}/oauth/register", self.config.issuer));
+            meta["registration_endpoint"] = json!(format!("{}/oauth/register", self.config.issuer));
         }
         meta
     }
@@ -552,11 +551,8 @@ impl OAuthState {
                     .refresh_token
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("refresh_token required"))?;
-                let (record, refresh) = self.rotate_refresh_token(
-                    presented,
-                    &client_id,
-                    form.resource.as_deref(),
-                )?;
+                let (record, refresh) =
+                    self.rotate_refresh_token(presented, &client_id, form.resource.as_deref())?;
                 let resource = form.resource.as_deref().or(record.resource.as_deref());
                 let access = self.issue_access_token(&record.sub, resource)?;
                 Ok(token_response(
@@ -879,7 +875,8 @@ fn load_refresh(path: &Path) -> Result<HashMap<String, RefreshRecord>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }
-    let bytes = fs::read(path).with_context(|| format!("read refresh tokens {}", path.display()))?;
+    let bytes =
+        fs::read(path).with_context(|| format!("read refresh tokens {}", path.display()))?;
     let file: RefreshFile = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse refresh tokens {}", path.display()))?;
     if file.version != REFRESH_STORE_VERSION {
@@ -1374,8 +1371,7 @@ mod tests {
         assert_eq!(id.principal, "hivemind-cli");
 
         // Old handle remains invalid after rotation + another reload.
-        let again =
-            OAuthState::with_persist_paths(config, None, Some(refresh_path)).unwrap();
+        let again = OAuthState::with_persist_paths(config, None, Some(refresh_path)).unwrap();
         assert!(
             again
                 .exchange_token(&TokenForm {

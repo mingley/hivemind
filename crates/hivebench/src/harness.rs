@@ -15,9 +15,7 @@ use tempfile::TempDir;
 
 use crate::baselines::{self, Condition};
 use crate::er::{ErMetrics, run_er};
-use crate::ledger::{
-    ActorKind, Category, CountSource, Ledger, LedgerEntry, estimate_tokens,
-};
+use crate::ledger::{ActorKind, Category, CountSource, Ledger, LedgerEntry, estimate_tokens};
 use crate::scenario::{Probe, Scenario};
 use crate::tools::tool_schema_tokens;
 use hivemind_engine::{Store, render_card};
@@ -318,10 +316,7 @@ fn record_store_turn(
                 category: Category::QueryEmbedding,
                 input_tokens: q_embed,
                 source: CountSource::Estimated,
-                note: format!(
-                    "query embed probe {} (no vector worker; chars÷4)",
-                    probe.id
-                ),
+                note: format!("query embed probe {} (no vector worker; chars÷4)", probe.id),
             },
         );
     }

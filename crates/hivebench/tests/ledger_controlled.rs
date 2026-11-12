@@ -27,7 +27,11 @@ fn controlled_hivemind_records_measured_and_estimated_categories() {
     .expect("controlled loop");
 
     assert_eq!(run.turns, s.probes.len());
-    assert!(run.er.hits_at_k > 0, "expected retrieval hits: {:?}", run.er);
+    assert!(
+        run.er.hits_at_k > 0,
+        "expected retrieval hits: {:?}",
+        run.er
+    );
 
     let by = run.ledger.tokens_by_category();
     assert!(
@@ -129,7 +133,10 @@ fn dry_run_alias_matches_controlled_defaults() {
     let s = scenario_01();
     let a = hivebench::dry_run(&s, Condition::Hivemind, 8).unwrap();
     let b = run_controlled(&s, Condition::Hivemind, LoopOptions::default()).unwrap();
-    assert_eq!(a.ledger.total_non_judge_tokens(), b.ledger.total_non_judge_tokens());
+    assert_eq!(
+        a.ledger.total_non_judge_tokens(),
+        b.ledger.total_non_judge_tokens()
+    );
     assert_eq!(a.ledger.entries.len(), b.ledger.entries.len());
 }
 
@@ -146,9 +153,10 @@ fn no_expand_skips_followup() {
         },
     )
     .unwrap();
-    assert!(!run
-        .ledger
-        .entries
-        .iter()
-        .any(|e| e.category == Category::FollowupExpansion));
+    assert!(
+        !run.ledger
+            .entries
+            .iter()
+            .any(|e| e.category == Category::FollowupExpansion)
+    );
 }
