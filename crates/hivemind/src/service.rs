@@ -1,12 +1,14 @@
 //! Transport-independent handlers over a [`hivemind_engine::Store`].
 
+use std::collections::HashSet;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
 use hivemind_core::applicability::Context;
 use hivemind_core::{
     Actor, ActorKind, ClaimData, ClaimId, ClaimKind, EdgeKind, EvidenceRef, Origin, Outcome,
-    RetractReason, Scope, Timestamp,
+    RetractReason, Scope, Timestamp, consumption_taints_session, session_taint_key,
 };
 use hivemind_engine::{ChangesFilter, Query, Store};
 use serde::Deserialize;
@@ -35,6 +37,8 @@ pub struct ChangesFilterParams {
 pub struct Service {
     store: Store,
     version: String,
+    /// In-process session taint bits keyed by [`session_taint_key`].
+    session_taint: Mutex<HashSet<String>>,
 }
 
 impl Service {
@@ -42,6 +46,7 @@ impl Service {
         Self {
             store,
             version: env!("CARGO_PKG_VERSION").to_owned(),
+            session_taint: Mutex::new(HashSet::new()),
         }
     }
 
@@ -120,6 +125,21 @@ impl Service {
         }
     }
 
+    fn mark_session_tainted(&self, actor: &Actor) {
+        let key = session_taint_key(&actor.principal, actor.session.as_deref());
+        if let Ok(mut guard) = self.session_taint.lock() {
+            guard.insert(key);
+        }
+    }
+
+    fn session_is_tainted(&self, actor: &Actor) -> bool {
+        let key = session_taint_key(&actor.principal, actor.session.as_deref());
+        self.session_taint
+            .lock()
+            .map(|g| g.contains(&key))
+            .unwrap_or(false)
+    }
+
     fn wait_if_needed(&self, min_offset: Option<u64>) -> Result<()> {
         if let Some(min) = min_offset {
             self.store
@@ -145,6 +165,12 @@ impl Service {
         if let Some(origin) = p.origin {
             data.provenance.origin = origin;
         }
+        // Session that consumed untrusted/tainted content cannot launder a
+        // "self-authored" write into trusted memory: force external origin so
+        // the claim stays tainted across replay (same as Origin::External).
+        if self.session_is_tainted(&actor) {
+            data.provenance.origin = Origin::External;
+        }
         if let Some(urls) = p.evidence_urls {
             for url in urls {
                 data.provenance.evidence.push(EvidenceRef::Url(url));
@@ -162,6 +188,7 @@ impl Service {
 
     fn recall(&self, params: Value) -> Result<Value> {
         let p: RecallParams = serde_json::from_value(params)?;
+        let actor = self.actor_from(&p.actor);
         self.wait_if_needed(p.min_offset)?;
         let query = Query {
             text: p.query,
@@ -177,12 +204,20 @@ impl Service {
             ..Query::default()
         };
         let recall = self.store.recall(&query);
+        if recall
+            .cards
+            .iter()
+            .any(|c| consumption_taints_session(c.trust, c.tainted))
+        {
+            self.mark_session_tainted(&actor);
+        }
         crate::obs::record_recall();
         Ok(serde_json::to_value(recall)?)
     }
 
     fn show(&self, params: Value) -> Result<Value> {
         let p: ShowParams = serde_json::from_value(params)?;
+        let actor = self.actor_from(&p.actor);
         self.wait_if_needed(p.min_offset)?;
         let id = self.store.resolve(&p.id)?;
         let ctx = p.ctx.map(ctx_map);
@@ -190,6 +225,9 @@ impl Service {
             .store
             .get(&id, ctx.as_ref())
             .ok_or_else(|| anyhow!("claim {id} missing after resolve"))?;
+        if consumption_taints_session(detail.belief.trust, detail.tainted) {
+            self.mark_session_tainted(&actor);
+        }
         Ok(serde_json::to_value(detail)?)
     }
 
@@ -392,6 +430,9 @@ struct RecallParams {
     limit: Option<usize>,
     budget: Option<usize>,
     min_offset: Option<u64>,
+    /// Used for session-taint keying when this recall returns untrusted content.
+    #[serde(default)]
+    actor: ActorParams,
 }
 
 #[derive(Debug, Deserialize)]
@@ -399,6 +440,9 @@ struct ShowParams {
     id: String,
     ctx: Option<Vec<(String, String)>>,
     min_offset: Option<u64>,
+    /// Used for session-taint keying when this show returns untrusted content.
+    #[serde(default)]
+    actor: ActorParams,
 }
 
 #[derive(Debug, Deserialize)]

@@ -92,7 +92,8 @@ unless you add an external policy layer.
 | Cleartext on the wire | `REQUIRE_TLS` + reverse-proxy contract; residual if operators skip both. |
 | Token replay within TTL | Short access TTL; refresh handles rotate on use (replay of spent refresh fails). In-memory refresh store (process restart invalidates refresh handles; DCR clients themselves persist). |
 | Token / RPC / register abuse | Per IP+client / IP / IP+principal rate limits; residual if many source IPs or shared NAT. |
-| Poisoned memory as instructions | Separate trust/quarantine work (P0-C); retrieval is evidence, not instructions. |
+| Poisoned memory as instructions | Trust tiers + quarantine presentation (P0-C); retrieval is evidence, not instructions. |
+| Session laundering of untrusted text | In-process **session taint** on `Service`: after `recall`/`show` returns untrusted or tainted claims, the reader key is marked; later `remember` from that key forces `origin=external` so the write stays tainted and `promote` still refuses below corroborated/human. **Keying:** `principal`, plus `session` when set (`principal` + U+001F + `session`). Shared path uses token `sub` / bootstrap / MCP client id as principal; local stdio uses `HIVEMIND_PRINCIPAL` (+ optional `HIVEMIND_SESSION`). Distinct sessions under one principal do not cross-contaminate. State is memory-only (cleared on process restart); F12 attack-cut measurement remains separate. |
 
 ## Reporting
 

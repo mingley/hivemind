@@ -91,5 +91,6 @@ pub use scope::{Scope, ScopeParseError};
 pub use time::{TimeParseError, Timestamp};
 pub use trust::{
     Presentation, PromoteError, QUARANTINE_CLOSE, QUARANTINE_OPEN, check_promotion,
-    present_statement, quarantine_statement, should_quarantine,
+    consumption_taints_session, present_statement, quarantine_statement, session_taint_key,
+    should_quarantine,
 };

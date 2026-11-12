@@ -327,7 +327,7 @@ production ANN library under all distributions.
 | Do agent sandboxes allow a Unix socket or a spawned daemon? | Decides the default local transport | **Claude Code default path: yes** (MCP outside Bash sandbox) — [setup-mcp.md](setup-mcp.md#sandbox-answer-claude-code--proven-default-path). Codex/Copilot when sandboxed: allowlist or pre-start daemon |
 | How does a stdio shim get a per-agent identity? | Attribution and access control | M1 uses env (`HIVEMIND_PRINCIPAL` / `_AGENT` / `_SESSION`); authenticated credentials remain for later |
 | How should writes happen without burdening agents? (agent-authored tool calls versus hooks at session end) | Write quality and token cost (F6) | M2 harness compares the two |
-| Session-level taint: did the agent read untrusted content before writing? | Laundering untrusted text into trusted memory | Design in M3; attack tests in F12 |
+| Session-level taint: did the agent read untrusted content before writing? | Laundering untrusted text into trusted memory | **Shipped (mechanism):** in-process bit on `Service`, keyed by principal[+session]; recall/show of untrusted/tainted sets it; remember forces `origin=external`. See [SECURITY.md](../SECURITY.md). F12 still measures ≥80% attack-cut |
 | Which embedding model, if any, is the default? | Footprint and quality | F4 offline in M2, online in M4 |
 | What erasure SLA, and is crypto-shredding enough legally? | Privacy compliance for shared use | Before M5 |
 | License for the repository | Adoption and contributions | Owner decision before the first release |

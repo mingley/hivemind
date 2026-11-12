@@ -103,6 +103,9 @@ pub struct Card {
     pub presentation: Presentation,
     pub evidence: usize,
     pub citations: usize,
+    /// True when the claim carries external/derived taint (session reads use this).
+    #[serde(default)]
+    pub tainted: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<Flag>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -506,6 +509,7 @@ fn card_with_prior(
         presentation,
         evidence: row.evidence_count,
         citations: row.citations_count,
+        tainted: row.tainted,
         flags,
         superseded_by: row.superseded_by,
         conflicts_with: belief.conflicts,

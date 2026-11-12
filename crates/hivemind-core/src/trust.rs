@@ -74,6 +74,29 @@ pub enum PromoteError {
     NotWider { from: String, to: String },
 }
 
+/// Builds the in-process session-taint key for an authenticated actor.
+///
+/// **Keying:** `principal`, and when a session id is present,
+/// `principal` + unit-separator + `session`. Shared HTTP/gRPC/MCP use the
+/// token subject (or bootstrap / configured MCP client id) as `principal`;
+/// local stdio uses `HIVEMIND_PRINCIPAL` (else `USER` / `anonymous`) and
+/// optional `HIVEMIND_SESSION`. Concurrent sessions under one principal do
+/// not cross-contaminate when each sets a distinct session id. Without a
+/// session id, taint is principal-wide for that process/`Service` instance
+/// (per tenant). State is in-memory only (cleared on restart).
+pub fn session_taint_key(principal: &str, session: Option<&str>) -> String {
+    match session.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(session) => format!("{principal}\u{1f}{session}"),
+        None => principal.to_owned(),
+    }
+}
+
+/// True when returning this claim to a reader should mark the session tainted
+/// (untrusted tier, explicit taint bit, or quarantine presentation).
+pub fn consumption_taints_session(trust: TrustTier, tainted: bool) -> bool {
+    tainted || should_quarantine(trust)
+}
+
 /// Promotion policy from `docs/03-memory-model.md`: widen only, and only when
 /// trust is at least corroborated (human review counts as [`TrustTier::Human`]).
 ///
@@ -142,5 +165,29 @@ mod tests {
             check_promotion(TrustTier::Human, &project, &project),
             Err(PromoteError::NotWider { .. })
         ));
+    }
+
+    #[test]
+    fn session_taint_key_includes_session_when_set() {
+        assert_eq!(session_taint_key("alice", None), "alice");
+        assert_eq!(session_taint_key("alice", Some("")), "alice");
+        assert_eq!(session_taint_key("alice", Some("  ")), "alice");
+        assert_eq!(
+            session_taint_key("alice", Some("sess-1")),
+            format!("alice\u{1f}sess-1")
+        );
+        assert_ne!(
+            session_taint_key("alice", Some("a")),
+            session_taint_key("alice", Some("b"))
+        );
+    }
+
+    #[test]
+    fn consumption_taints_on_untrusted_or_tainted_bit() {
+        assert!(consumption_taints_session(TrustTier::Untrusted, false));
+        assert!(consumption_taints_session(TrustTier::Agent, true));
+        assert!(!consumption_taints_session(TrustTier::Agent, false));
+        assert!(!consumption_taints_session(TrustTier::Corroborated, false));
+        assert!(!consumption_taints_session(TrustTier::Human, false));
     }
 }

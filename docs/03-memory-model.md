@@ -245,13 +245,16 @@ Other operations:
 
   Tiers control **promotion to wider scopes** and **presentation**. Untrusted
   claims render in a quarantined block and never as instructions.
-- **Taint propagates.** Without a human review, a derived claim's trust tier
+- **  Taint propagates.** Without a human review, a derived claim's trust tier
   is the **minimum** of its inputs' tiers, so consolidation cannot launder
   untrusted text into trusted memory. A human *authoring* external content
-  doesn't lift its taint; only an explicit human review does. One residual risk remains: an agent can paraphrase untrusted text it
-  read earlier into a "self-authored" claim. Catching that needs session-level
-  taint tracking. That is an open problem, and experiment F12 measures it
-  ([research/06](../research/06-architecture-distribution-protocols-security.md#83-threat-model-table)).
+  doesn't lift its taint; only an explicit human review does. **Session-level
+  taint** closes the paraphrase path: if a principal (and optional session id)
+  `recall`s or `show`s untrusted/tainted content, later `remember` calls from
+  that key force external origin so the write stays tainted and cannot
+  `promote` until human review or corroboration. Keying and residuals are in
+  [SECURITY.md](../SECURITY.md); experiment F12 still measures attack-cut
+  under paraphrase ([research/06](../research/06-architecture-distribution-protocols-security.md#83-threat-model-table)).
 - **Instructions need a higher bar.** Procedural claims that tell an agent to
   run something ("always do X") need at least `corroborated` trust and explicit
   promotion before they leave the writer's scope. Invisible and bidirectional
