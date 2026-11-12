@@ -156,7 +156,8 @@ mod postcard_wire {
         ClaimAsserted {
             claim: ClaimId,
             supersedes: Vec<ClaimId>,
-            data: WireClaimData,
+            /// Boxed to keep `WireEventBody` small (`large_enum_variant`).
+            data: Box<WireClaimData>,
         },
         ClaimInvalidated {
             claim: ClaimId,
@@ -306,7 +307,7 @@ mod postcard_wire {
                 } => Self::ClaimAsserted {
                     claim: *claim,
                     supersedes: supersedes.clone(),
-                    data: WireClaimData::from(data.as_ref()),
+                    data: Box::new(WireClaimData::from(data.as_ref())),
                 },
                 EventBody::ClaimInvalidated { claim, at, reason } => Self::ClaimInvalidated {
                     claim: *claim,

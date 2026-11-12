@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(session_taint_key("alice", Some("  ")), "alice");
         assert_eq!(
             session_taint_key("alice", Some("sess-1")),
-            format!("alice\u{1f}sess-1")
+            "alice\u{1f}sess-1".to_string()
         );
         assert_ne!(
             session_taint_key("alice", Some("a")),

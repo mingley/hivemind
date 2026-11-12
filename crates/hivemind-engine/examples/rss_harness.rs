@@ -310,7 +310,7 @@ fn main() {
         let probe = Store::open(&path, Options::default());
         match probe {
             Ok(s) => {
-                let n = s.stats().claims as usize;
+                let n = s.stats().claims;
                 // Advance RNG to stay deterministic only for fresh stores.
                 // Reusing a pre-filled --dir is for resume/scale scripts; seed
                 // continuity is best-effort when the dir already has claims.
