@@ -229,6 +229,10 @@ cargo build --release --locked -p hivemind
 
 ## Container
 
+The multi-stage `Dockerfile` installs `protobuf-compiler` in the build stage
+(required for `crates/hivemind` gRPC stubs, same as CI/release) and ships
+stripped `hivemind` / `hivemindd` binaries.
+
 ```bash
 docker build -t hivemind:local .
 docker run --rm -p 8787:8787 -p 8788:8788 \

@@ -1,8 +1,13 @@
 # Multi-stage build for the shared `hivemind` / `hivemindd` binaries.
 # See docs/operations.md for run instructions.
+# protoc is required: crates/hivemind/build.rs compiles gRPC stubs via tonic.
 
 FROM rust:1.89-bookworm AS build
 WORKDIR /src
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/* \
+    && protoc --version
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN cargo build --release --locked -p hivemind \

@@ -289,8 +289,10 @@ model weights file (plug any `Embedder` in), ANN, or F4 online quality wins.
   `WWW-Authenticate` with `resource_metadata` on 401. Bootstrap bearer, OAuth
   client secret, and signing key are **separate** (`HIVEMIND_TOKEN` /
   `HIVEMIND_OAUTH_CLIENT_SECRET` / `HIVEMIND_SIGNING_KEY`). Shared-path write
-  attribution uses the token subject (not env TOFU). **Scoped deferral (P1):**
-  no external IdP federation, no dynamic client registration.
+  attribution uses the token subject (not env TOFU). **Later landed (post-M5):**
+  RFC 7591 DCR (`/oauth/register`) with durable clients + refresh-token
+  persistence, plus token/RPC rate limits. **NON-goal:** external IdP
+  federation (in-process AS only).
 - **gRPC:** tonic `hivemind.v1.Hivemind` (`Hello`, `Rpc`, `ChangesSince`) on
   `--grpc-listen` (default port 8788); same bearer/OAuth validation.
 - **Laptop sync helpers:** append-only upload queue + pull cursor JSON under
@@ -336,7 +338,7 @@ production ANN library under all distributions.
 | How does a stdio shim get a per-agent identity? | Attribution and access control | M1 uses env (`HIVEMIND_PRINCIPAL` / `_AGENT` / `_SESSION`); authenticated credentials remain for later |
 | How should writes happen without burdening agents? (agent-authored tool calls versus hooks at session end) | Write quality and token cost (F6) | M2 harness compares the two |
 | Session-level taint: did the agent read untrusted content before writing? | Laundering untrusted text into trusted memory | **Shipped (mechanism):** in-process bit on `Service`, keyed by principal[+session]; recall/show of untrusted/tainted sets it; remember forces `origin=external`. See [SECURITY.md](../SECURITY.md). F12 still measures ≥80% attack-cut |
-| Which embedding model, if any, is the default? | Footprint and quality | F4 offline in M2, online in M4 |
-| What erasure SLA, and is crypto-shredding enough legally? | Privacy compliance for shared use | Before M5 |
+| Which embedding model, if any, is the default? | Footprint and quality | **Answered:** lexical-only lean default; optional Model2Vec via `--features embeddings` ([operations.md](operations.md#embeddings-optional-lean-default-is-lexical-only)). Hybrid ≥10% win not evidenced |
+| What erasure SLA, and is crypto-shredding enough legally? | Privacy compliance for shared use | **Shipped:** `forget` physical purge + online SLA in [operations.md](operations.md#erasure--forget-privacy-sla). Legal fitness per jurisdiction remains operator/compliance |
 | License for the repository | Adoption and contributions | Owner decision before the first release |
 | Default event encoding (JSON v1 now) | Size, speed, and canonical hashing | **Landed:** postcard codec 2 optional; JSON remains default — [operations.md](operations.md#event-codec) |
