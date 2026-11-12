@@ -15,7 +15,7 @@ RUN cargo build --release --locked -p hivemind \
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/hivemind /usr/local/bin/hivemind
 COPY --from=build /src/target/release/hivemindd /usr/local/bin/hivemindd
@@ -29,6 +29,10 @@ ENV HIVEMIND_ROOT=/var/lib/hivemind \
 EXPOSE 8787 8788
 VOLUME ["/var/lib/hivemind"]
 # Shared service; set distinct HIVEMIND_TOKEN, HIVEMIND_OAUTH_CLIENT_SECRET,
-# and HIVEMIND_SIGNING_KEY at runtime (see SECURITY.md).
+# and HIVEMIND_SIGNING_KEY at runtime (see SECURITY.md). For production TLS
+# termination also set HIVEMIND_PUBLIC_BASE=https://… and HIVEMIND_REQUIRE_TLS=1;
+# optionally HIVEMIND_DISABLE_DCR=1.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8787/health >/dev/null || exit 1
 ENTRYPOINT ["hivemind"]
 CMD ["serve", "--listen", "0.0.0.0:8787", "--root", "/var/lib/hivemind"]

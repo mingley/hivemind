@@ -195,6 +195,11 @@ struct ServeArgs {
     /// Persisted OAuth refresh-token store JSON [default: {root}/oauth/refresh_tokens.json].
     #[arg(long, env = "HIVEMIND_OAUTH_REFRESH_PATH")]
     oauth_refresh_path: Option<PathBuf>,
+    /// Disable open RFC 7591 DCR (`/oauth/register` → 404). Also
+    /// `HIVEMIND_DISABLE_DCR=1|true|yes|on`. Pre-configured client still works;
+    /// clients already on disk remain usable.
+    #[arg(long, default_value_t = false)]
+    disable_dcr: bool,
     /// Skip fsync (tests only).
     #[arg(long, hide = true)]
     no_fsync: bool,
@@ -566,6 +571,7 @@ fn run(cli: Cli) -> Result<()> {
             };
             let rt = tokio::runtime::Runtime::new()?;
             let require_tls = args.require_tls || env_flag_true("HIVEMIND_REQUIRE_TLS");
+            let disable_dcr = args.disable_dcr || env_flag_true("HIVEMIND_DISABLE_DCR");
             return rt.block_on(hivemind::http::serve(hivemind::http::ServeArgs {
                 root,
                 listen,
@@ -585,6 +591,7 @@ fn run(cli: Cli) -> Result<()> {
                 rpc_rate_per_minute: args.rpc_rate_per_minute,
                 oauth_clients_path: args.oauth_clients_path.clone(),
                 oauth_refresh_path: args.oauth_refresh_path.clone(),
+                disable_dcr,
                 embedder: args.embedder.clone(),
             }));
         }

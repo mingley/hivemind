@@ -84,6 +84,8 @@ pub struct ServeArgs {
     pub oauth_clients_path: Option<PathBuf>,
     /// Durable refresh-token store JSON. Default: `{root}/oauth/refresh_tokens.json`.
     pub oauth_refresh_path: Option<PathBuf>,
+    /// When true, RFC 7591 `/oauth/register` is off (pre-configured client only).
+    pub disable_dcr: bool,
     /// Optional embedder (default none = lexical-only).
     pub embedder: EmbedderArgs,
 }
@@ -129,6 +131,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
             resource: format!("{issuer}/mcp"),
             access_token_ttl_secs: args.access_token_ttl_secs,
             refresh_token_ttl_secs: args.refresh_token_ttl_secs,
+            dcr_enabled: !args.disable_dcr,
         },
         Some(clients_path.clone()),
         Some(refresh_path.clone()),
@@ -203,6 +206,8 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         ));
 
     // Ops probes stay open (no rate-limit layer). Token endpoint is limited in-handler.
+    // `/oauth/register` stays mounted when DCR is disabled so clients get an
+    // explicit 404 (AS metadata already omits `registration_endpoint`).
     let app = Router::new()
         .route("/health", get(health))
         .route("/readyz", get(readyz))
@@ -256,6 +261,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         oauth_clients = %clients_path.display(),
         oauth_refresh = %refresh_path.display(),
         require_tls = args.require_tls,
+        dcr_enabled = !args.disable_dcr,
         token_rate_per_minute = args.token_rate_per_minute,
         register_rate_per_minute = args.register_rate_per_minute,
         rpc_rate_per_minute = args.rpc_rate_per_minute,
@@ -522,6 +528,13 @@ async fn oauth_register(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<ClientRegistrationRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if !state.oauth.config.dcr_enabled {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "dynamic client registration is disabled".into(),
+            retry_after_secs: None,
+        });
+    }
     let key = addr.ip().to_string();
     if let Err(limited) = state.limiter.check(RateClass::Register, &key) {
         return Err(ApiError::rate_limited(limited));

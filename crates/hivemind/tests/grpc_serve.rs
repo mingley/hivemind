@@ -30,6 +30,7 @@ async fn grpc_hello_and_rpc_with_bearer() {
         resource: format!("{issuer}/mcp"),
         access_token_ttl_secs: DEFAULT_ACCESS_TOKEN_TTL_SECS,
         refresh_token_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
+        dcr_enabled: true,
     });
 
     let serve = tokio::spawn(grpc::serve(GrpcArgs {
@@ -105,6 +106,7 @@ async fn grpc_rpc_rate_limit_resource_exhausted() {
         resource: format!("{issuer}/mcp"),
         access_token_ttl_secs: DEFAULT_ACCESS_TOKEN_TTL_SECS,
         refresh_token_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
+        dcr_enabled: true,
     });
 
     let serve = tokio::spawn(grpc::serve(GrpcArgs {

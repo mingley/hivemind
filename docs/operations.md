@@ -87,13 +87,15 @@ tags in one store. Golden fixtures:
 | `HIVEMIND_REGISTER_RATE_PER_MINUTE` | Sustained `/oauth/register` rate per client IP (`0` disables) | `10` |
 | `HIVEMIND_RPC_RATE_PER_MINUTE` | Sustained authenticated HTTP/MCP/gRPC RPC rate per IP+principal (`0` disables) | `600` |
 | `HIVEMIND_REQUIRE_TLS` | `1`/`true`/`yes` — refuse start unless `PUBLIC_BASE` is `https://` | unset |
+| `HIVEMIND_DISABLE_DCR` | `1`/`true`/`yes`/`on` — disable open RFC 7591 `/oauth/register` | unset (DCR on) |
 | `HIVEMIND_GRPC_LISTEN` | gRPC listen address | same host as HTTP, port `8788` |
 
 Flags: `--listen` (default `127.0.0.1:8787`), `--no-grpc`, `--token`,
 `--oauth-client-secret`, `--signing-key`, `--oauth-clients-path`,
 `--oauth-refresh-path`, `--access-token-ttl-secs`, `--refresh-token-ttl-secs`,
 `--token-rate-per-minute`, `--register-rate-per-minute`,
-`--rpc-rate-per-minute`, `--require-tls`, `--root`, plus the embedder flags below.
+`--rpc-rate-per-minute`, `--require-tls`, `--disable-dcr`, `--root`, plus the
+embedder flags below.
 
 **Rate limits:** in-process token buckets. Excess `/oauth/token`,
 `/oauth/register`, or authenticated RPC returns HTTP `429` with `Retry-After`
@@ -110,18 +112,23 @@ load from `HIVEMIND_OAUTH_REFRESH_PATH` (default
 atomically on issue/rotate so they survive process restart. See
 [SECURITY.md](../SECURITY.md).
 
-**Dynamic Client Registration (RFC 7591):** `POST /oauth/register` (open;
-rate-limited). Minimal JSON body: `redirect_uris`, `client_name`,
+**Dynamic Client Registration (RFC 7591):** by default `POST /oauth/register`
+(open; rate-limited). Minimal JSON body: `redirect_uris`, `client_name`,
 `token_endpoint_auth_method` (`client_secret_basic` preferred, or `none` for
 public MCP clients), `grant_types` (default `authorization_code` +
 `refresh_token`). Response includes `client_id` and `client_secret` when
-confidential. AS metadata advertises `registration_endpoint`. Clients are
-loaded on startup from
+confidential. AS metadata advertises `registration_endpoint` when DCR is on.
+Clients are loaded on startup from
 `HIVEMIND_OAUTH_CLIENTS_PATH` (default `{HIVEMIND_ROOT}/oauth/dcr_clients.json`)
 and rewritten atomically (temp + rename) after each successful register so the
 same `client_id` / secret work across process restarts. The file contains
 secrets — keep the data root private. The configured
-`HIVEMIND_OAUTH_CLIENT_ID` / secret remain valid alongside DCR.
+`HIVEMIND_OAUTH_CLIENT_ID` / secret remain valid alongside DCR. **Production
+lock-down:** `--disable-dcr` or `HIVEMIND_DISABLE_DCR=1` makes
+`/oauth/register` return 404 and omits `registration_endpoint` (pre-configured
+client and any clients already on disk still work). `/oauth/authorize`
+auto-approves with no human login; token `sub` is the OAuth client_id — see
+[SECURITY.md](../SECURITY.md).
 
 **TLS:** `hivemind serve` speaks plaintext HTTP/gRPC. Production MUST terminate
 TLS at a reverse proxy (or equivalent), set
@@ -218,7 +225,8 @@ the LazyFS power-loss gap: [f13-crash-injection.md](f13-crash-injection.md).
 - **Release packaging:** `.github/workflows/release.yml` — installs `protoc`,
   then on `main` pushes, `v*` tags, and `workflow_dispatch` builds Linux
   release binaries and uploads artifact `hivemind-linux-x86_64` (`hivemind`,
-  `hivemindd`, `SHA256SUMS`, and a `.tar.gz`).
+  `hivemindd`, `SHA256SUMS`, and a `.tar.gz`). On `v*` tags the same tarball
+  and `SHA256SUMS` are also attached to a GitHub Release.
 
 Local equivalent:
 
@@ -245,9 +253,12 @@ docker run --rm -p 8787:8787 -p 8788:8788 \
 ```
 
 The image entrypoint is `hivemind serve --listen 0.0.0.0:8787 --root /var/lib/hivemind`.
-Pass distinct bootstrap / client-secret / signing-key env vars. Override with
-e.g. `docker run … hivemind:local daemon` for a single-store daemon (publish no
-HTTP ports in that case; use a volume for `HIVEMIND_DIR`).
+Pass distinct bootstrap / client-secret / signing-key env vars. The image
+`HEALTHCHECK` probes `GET /health`. For production behind TLS termination, also
+set `HIVEMIND_PUBLIC_BASE=https://…`, `HIVEMIND_REQUIRE_TLS=1`, and consider
+`HIVEMIND_DISABLE_DCR=1` if agents use only the pre-configured client. Override
+with e.g. `docker run … hivemind:local daemon` for a single-store daemon
+(publish no HTTP ports in that case; use a volume for `HIVEMIND_DIR`).
 
 ## Embeddings (optional; lean default is lexical-only)
 

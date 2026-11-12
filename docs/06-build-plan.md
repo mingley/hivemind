@@ -103,9 +103,9 @@ synthetic claims across 20 scopes, synthetic vocabulary of 207k terms;
 | RSS after replay | 230 MB | ≤ 50 MB ❌ |
 
 **The RSS miss is an F8 finding.** The v0 projections hold every claim's full
-data in memory, and the synthetic vocabulary is large. The planned fix is
-three changes (still open after M1; see
-[M1 status](#m1-status-daemon-and-mcp-done-2026-11-11)):
+data in memory, and the synthetic vocabulary is large. The planned fix was
+three changes (**landed** after M1; see
+[M1 status](#m1-status-daemon-and-mcp-done-2026-11-11) for mid-scale re-measure):
 
 - **Compact rows** ("keydir"): filter and rank fields stay in memory, and
   full claims are read from the log by offset on demand.
@@ -144,7 +144,8 @@ change until then):
   `kill -9` ship in CI; LazyFS / turmoil-fs remain open — see
   [f13-crash-injection.md](f13-crash-injection.md).
 - `forget`: erasure with a physical purge of log payloads, blobs, and
-  projections (M3).
+  projections. **Done** (`Store::forget` + CLI/MCP/HTTP; online SLA in
+  [operations.md](operations.md#erasure--forget-privacy-sla)).
 
 ## M1 status: daemon and MCP (done 2026-11-11)
 
@@ -291,8 +292,10 @@ model weights file (plug any `Embedder` in), ANN, or F4 online quality wins.
   `HIVEMIND_OAUTH_CLIENT_SECRET` / `HIVEMIND_SIGNING_KEY`). Shared-path write
   attribution uses the token subject (not env TOFU). **Later landed (post-M5):**
   RFC 7591 DCR (`/oauth/register`) with durable clients + refresh-token
-  persistence, plus token/RPC rate limits. **NON-goal:** external IdP
-  federation (in-process AS only).
+  persistence, token/RPC rate limits, and `--disable-dcr` /
+  `HIVEMIND_DISABLE_DCR` kill switch. Authorize is auto-approve (token `sub` =
+  client_id; no human login). **NON-goal:** external IdP federation
+  (in-process AS only).
 - **gRPC:** tonic `hivemind.v1.Hivemind` (`Hello`, `Rpc`, `ChangesSince`) on
   `--grpc-listen` (default port 8788); same bearer/OAuth validation.
 - **Laptop sync helpers:** append-only upload queue + pull cursor JSON under

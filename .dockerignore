@@ -1,0 +1,13 @@
+# Keep the Docker build context small; the Dockerfile only COPY's Cargo.* + crates/.
+.git
+.github
+target
+**/.DS_Store
+*.md
+!README.md
+docs
+research
+scenarios
+scripts
+/cursor
+**/*.rs.bk

@@ -27,22 +27,31 @@ reuse the bootstrap token as the client secret or signing key.
 ## Authentication and authorization
 
 - **Open:** `/health`, `/readyz`, `/metrics`, `/healthz`, OAuth metadata,
-  `/oauth/authorize`, `/oauth/token`, `/oauth/register` (token and register are
-  rate-limited; see below).
+  `/oauth/authorize`, `/oauth/token`, and (unless disabled) `/oauth/register`
+  (token and register are rate-limited; see below).
 - **Protected:** `/v1/tenants…`, `/mcp` — require `Authorization: Bearer …`.
 - **OAuth grants:** `client_credentials`, `authorization_code` + PKCE S256, and
   `refresh_token` against the pre-registered confidential client
-  (`HIVEMIND_OAUTH_CLIENT_ID`) **and** dynamically registered clients.
-- **Dynamic Client Registration (RFC 7591):** `POST /oauth/register` accepts a
-  minimal JSON body (`redirect_uris`, `client_name`,
-  `token_endpoint_auth_method`, `grant_types`). Prefer
+  (`HIVEMIND_OAUTH_CLIENT_ID`) **and** dynamically registered clients (when
+  DCR is enabled).
+- **Authorize is auto-approve:** `/oauth/authorize` does **not** present a
+  human login or consent UI. A valid `client_id` + registered `redirect_uri` +
+  PKCE challenge immediately redirects with a code. Access-token `sub` is the
+  OAuth **client_id** (agent/machine identity), not an end-user account. This
+  matches the in-process agent AS; it is not a general IdP.
+- **Dynamic Client Registration (RFC 7591):** by default `POST /oauth/register`
+  is open (rate-limited) and accepts a minimal JSON body (`redirect_uris`,
+  `client_name`, `token_endpoint_auth_method`, `grant_types`). Prefer
   `client_secret_basic` / `client_secret_post` (issues `client_secret`) or
   `none` (public). Default grants: `authorization_code` + `refresh_token`.
   Registered clients are persisted under
   `{HIVEMIND_ROOT}/oauth/dcr_clients.json` (override with
   `HIVEMIND_OAUTH_CLIENTS_PATH` / `--oauth-clients-path`); the file holds
-  `client_secret` values and should stay mode `0600` on the host. External
-  IdP federation remains out of scope.
+  `client_secret` values and should stay mode `0600` on the host. **Kill
+  switch:** `--disable-dcr` or `HIVEMIND_DISABLE_DCR=1` makes
+  `/oauth/register` return 404 and omits `registration_endpoint` from AS
+  metadata (pre-configured client and any clients already on disk still work).
+  External IdP federation remains out of scope.
 - **Access tokens:** sealed claims (`sub`, `iss`, `exp`, …) with a **short TTL**
   (default 300s, `HIVEMIND_ACCESS_TOKEN_TTL_SECS`).
 - **Refresh tokens:** opaque server-side handles issued on `authorization_code`
@@ -89,7 +98,8 @@ unless you add an external policy layer.
 | Stolen bootstrap token | Full admin on the shared API until rotated; keep off laptops in prod; rotate independently of signing key. |
 | Stolen client secret | Can mint access tokens for that client until rotated (configured or DCR). |
 | Stolen signing key | Attacker can forge access tokens; rotate and invalidate by changing the key (existing tokens fail MAC). |
-| Open DCR abuse | Anyone who can reach `/oauth/register` can create clients; rate-limited per IP. Residual: many source IPs / shared NAT; no admin approval step. |
+| Open DCR abuse | Anyone who can reach `/oauth/register` can create clients; rate-limited per IP. Residual: many source IPs / shared NAT; no admin approval step. Mitigate with network isolation and/or `--disable-dcr` / `HIVEMIND_DISABLE_DCR=1` (pre-configured client only). |
+| Authorize auto-approve | No interactive user login; code issued to any registered client+redirect. Token `sub` is the client_id. Residual only if untrusted parties can reach the AS or register clients. |
 | DCR client store theft | Persisted registry includes client secrets; protect `{HIVEMIND_ROOT}/oauth/` (file written `0600`). Rotate by deleting the entry / re-registering; no in-product rotation API yet. |
 | Refresh token store theft | Persisted handles mint new access tokens until TTL/rotation; protect `{HIVEMIND_ROOT}/oauth/refresh_tokens.json` (`0600`). Delete the file or rotate signing/client secrets to invalidate. |
 | Principal spoofing on shared RPC | Blocked: token `sub` overwrites request/env actor. |

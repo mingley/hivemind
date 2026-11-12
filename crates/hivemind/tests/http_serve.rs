@@ -28,6 +28,7 @@ fn test_args(root: std::path::PathBuf, addr: SocketAddr) -> ServeArgs {
         rpc_rate_per_minute: hivemind::ratelimit::DEFAULT_RPC_RATE_PER_MINUTE,
         oauth_clients_path: None,
         oauth_refresh_path: None,
+        disable_dcr: false,
         embedder: hivemind::embedder::EmbedderArgs::default(),
     }
 }
@@ -1030,6 +1031,59 @@ async fn refresh_persists_across_server_restart() {
     );
 
     serve2.abort();
+}
+
+/// Production hardening: `--disable-dcr` makes `/oauth/register` 404 and omits
+/// `registration_endpoint` from AS metadata (pre-configured client still works).
+#[tokio::test]
+async fn disable_dcr_rejects_register_and_omits_metadata() {
+    let root = tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let mut args = test_args(root.path().to_path_buf(), addr);
+    args.disable_dcr = true;
+    let client_secret = args.oauth_client_secret.clone();
+    let serve = tokio::spawn(http::serve(args));
+    wait_for(addr).await;
+    let client = reqwest::Client::new();
+
+    let meta = client
+        .get(format!(
+            "http://{addr}/.well-known/oauth-authorization-server"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(meta.status(), 200);
+    let body: serde_json::Value = meta.json().await.unwrap();
+    assert!(
+        body.get("registration_endpoint").is_none(),
+        "registration_endpoint must be omitted when DCR is disabled: {body}"
+    );
+
+    let reg = client
+        .post(format!("http://{addr}/oauth/register"))
+        .json(&json!({
+            "client_name": "should-fail",
+            "token_endpoint_auth_method": "client_secret_basic",
+            "grant_types": ["client_credentials"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        reg.status(),
+        404,
+        "register must 404 when DCR disabled, got {}",
+        reg.status()
+    );
+
+    // Pre-configured confidential client still works.
+    let _access = oauth_access(&client, addr, &client_secret).await;
+
+    serve.abort();
 }
 
 /// P1: excess `/oauth/register` returns 429.

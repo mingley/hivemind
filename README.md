@@ -132,7 +132,7 @@ Honest gaps — none of these are presented as “fully production certified”:
 | Risk | Status |
 |---|---|
 | **Multi-node HA** | Explicit NON-goal. One node + restore from shipped segment backups ([operations.md](docs/operations.md)). No leader election / multi-region active-active. |
-| **IdP / DCR** | Shared OAuth 2.1 AS is in-process (PKCE + client_credentials + refresh_token + RFC 7591 DCR, short access TTL, separated secrets). DCR clients persist under `{HIVEMIND_ROOT}/oauth/dcr_clients.json`; refresh handles under `{HIVEMIND_ROOT}/oauth/refresh_tokens.json`. External IdP federation is an explicit **NON-goal** (in-process AS only). |
+| **IdP / DCR** | Shared OAuth 2.1 AS is in-process (PKCE + client_credentials + refresh_token + RFC 7591 DCR, short access TTL, separated secrets). DCR clients persist under `{HIVEMIND_ROOT}/oauth/dcr_clients.json`; refresh handles under `{HIVEMIND_ROOT}/oauth/refresh_tokens.json`. Open DCR can be locked down with `--disable-dcr` / `HIVEMIND_DISABLE_DCR=1`. External IdP federation is an explicit **NON-goal** (in-process AS only). |
 | **Footprint at 100k** | Post-mitigation RSS ~**219 MB** vs ≤ **50 MB** target (10k ~30 MB). Mid-scale harness/script landed; 1M-scale RSS/replay budgets still unproven. |
 | **Embeddings default** | **Lexical-only** remains the lean default (F4): no embedder required for remember/recall. Optional Model2Vec via `--features embeddings` + `--embedder model2vec` ([operations.md](docs/operations.md#embeddings-optional-lean-default-is-lexical-only)); hybrid ≥10% win not evidenced in-repo. |
 | **F1–F12 research** | Mechanisms for trust, citations, hybrid recall, etc. ship; outcome / attack-efficacy measurements (F1–F12) remain open research, not ship blockers. |

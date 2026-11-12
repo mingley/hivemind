@@ -73,6 +73,10 @@ pub struct OAuthConfig {
     pub access_token_ttl_secs: u64,
     /// Refresh-token TTL in seconds (issued on authorization_code / refresh).
     pub refresh_token_ttl_secs: u64,
+    /// When false, RFC 7591 DCR is off: no `registration_endpoint` in AS
+    /// metadata and [`OAuthState::register_client`] refuses. Existing clients
+    /// already on disk remain usable.
+    pub dcr_enabled: bool,
 }
 
 /// Registered OAuth client (configured bootstrap or RFC 7591 DCR).
@@ -301,11 +305,10 @@ impl OAuthState {
     }
 
     pub fn authorization_server_metadata(&self) -> Value {
-        json!({
+        let mut meta = json!({
             "issuer": self.config.issuer,
             "authorization_endpoint": format!("{}/oauth/authorize", self.config.issuer),
             "token_endpoint": format!("{}/oauth/token", self.config.issuer),
-            "registration_endpoint": format!("{}/oauth/register", self.config.issuer),
             "response_types_supported": ["code"],
             "grant_types_supported": [
                 "authorization_code",
@@ -319,7 +322,12 @@ impl OAuthState {
                 "none"
             ],
             "scopes_supported": ["hivemind"],
-        })
+        });
+        if self.config.dcr_enabled {
+            meta["registration_endpoint"] =
+                json!(format!("{}/oauth/register", self.config.issuer));
+        }
+        meta
     }
 
     pub fn protected_resource_metadata(&self) -> Value {
@@ -372,6 +380,9 @@ impl OAuthState {
 
     /// RFC 7591 Dynamic Client Registration (open; rate-limited at HTTP).
     pub fn register_client(&self, req: &ClientRegistrationRequest) -> Result<Value> {
+        if !self.config.dcr_enabled {
+            bail!("dynamic client registration is disabled");
+        }
         let auth_method = req
             .token_endpoint_auth_method
             .as_deref()
@@ -981,6 +992,7 @@ mod tests {
             resource: "http://127.0.0.1:8787/mcp".into(),
             access_token_ttl_secs: DEFAULT_ACCESS_TOKEN_TTL_SECS,
             refresh_token_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
+            dcr_enabled: true,
         })
     }
 
@@ -1149,6 +1161,27 @@ mod tests {
     }
 
     #[test]
+    fn disable_dcr_omits_registration_endpoint_and_refuses_register() {
+        let mut cfg = state().config.clone();
+        cfg.dcr_enabled = false;
+        let s = OAuthState::new(cfg);
+        let meta = s.authorization_server_metadata();
+        assert!(meta.get("registration_endpoint").is_none());
+        let err = s
+            .register_client(&ClientRegistrationRequest {
+                client_name: Some("nope".into()),
+                token_endpoint_auth_method: Some("client_secret_basic".into()),
+                grant_types: Some(vec!["client_credentials".into()]),
+                ..ClientRegistrationRequest::default()
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("disabled"),
+            "expected disable error, got {err}"
+        );
+    }
+
+    #[test]
     fn dcr_confidential_client_credentials() {
         let s = state();
         let reg = s
@@ -1253,6 +1286,7 @@ mod tests {
             resource: "http://127.0.0.1:8787/mcp".into(),
             access_token_ttl_secs: DEFAULT_ACCESS_TOKEN_TTL_SECS,
             refresh_token_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
+            dcr_enabled: true,
         };
         let s = OAuthState::with_clients_path(config.clone(), Some(path.clone())).unwrap();
         let reg = s
@@ -1307,6 +1341,7 @@ mod tests {
             resource: "http://127.0.0.1:8787/mcp".into(),
             access_token_ttl_secs: DEFAULT_ACCESS_TOKEN_TTL_SECS,
             refresh_token_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
+            dcr_enabled: true,
         };
         let s = OAuthState::with_persist_paths(config.clone(), None, Some(refresh_path.clone()))
             .unwrap();
