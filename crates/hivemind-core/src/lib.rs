@@ -68,6 +68,7 @@ pub mod hygiene;
 pub mod ids;
 pub mod scope;
 pub mod time;
+pub mod trust;
 
 pub use applicability::{Applicability, Context};
 pub use belief::{BELIEF_POLICY, Status, TrustTier, Verification};
@@ -88,3 +89,7 @@ pub use fingerprint::{
 pub use ids::{BlobHash, ClaimId, EventId, IdParseError};
 pub use scope::{Scope, ScopeParseError};
 pub use time::{TimeParseError, Timestamp};
+pub use trust::{
+    Presentation, PromoteError, QUARANTINE_CLOSE, QUARANTINE_OPEN, check_promotion,
+    present_statement, quarantine_statement, should_quarantine,
+};

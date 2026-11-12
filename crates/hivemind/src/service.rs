@@ -5,8 +5,8 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow};
 use hivemind_core::applicability::Context;
 use hivemind_core::{
-    Actor, ActorKind, ClaimData, ClaimId, ClaimKind, EdgeKind, Outcome, RetractReason, Scope,
-    Timestamp,
+    Actor, ActorKind, ClaimData, ClaimId, ClaimKind, EdgeKind, EvidenceRef, Origin, Outcome,
+    RetractReason, Scope, Timestamp,
 };
 use hivemind_engine::{ChangesFilter, Query, Store};
 use serde::Deserialize;
@@ -69,6 +69,7 @@ impl Service {
             "invalidate" => self.invalidate(params),
             "link" => self.link(params),
             "feedback" => self.feedback(params),
+            "promote" => self.promote(params),
             "lease_acquire" => self.lease_acquire(params),
             "lease_renew" => self.lease_renew(params),
             "lease_release" => self.lease_release(params),
@@ -124,6 +125,14 @@ impl Service {
         if let Some(fields) = p.fields {
             for (k, v) in fields {
                 data.payload.insert(k, Value::String(v));
+            }
+        }
+        if let Some(origin) = p.origin {
+            data.provenance.origin = origin;
+        }
+        if let Some(urls) = p.evidence_urls {
+            for url in urls {
+                data.provenance.evidence.push(EvidenceRef::Url(url));
             }
         }
         let mut req = hivemind_engine::Remember::new(data);
@@ -242,6 +251,16 @@ impl Service {
         Ok(serde_json::to_value(receipt)?)
     }
 
+    fn promote(&self, params: Value) -> Result<Value> {
+        let p: PromoteParams = serde_json::from_value(params)?;
+        let actor = self.actor_from(&p.actor);
+        let id = self.store.resolve(&p.id)?;
+        let receipt = self
+            .store
+            .promote(&actor, id, p.scope, p.idempotency_key)?;
+        Ok(serde_json::to_value(receipt)?)
+    }
+
     fn lease_acquire(&self, params: Value) -> Result<Value> {
         let p: LeaseAcquireParams = serde_json::from_value(params)?;
         let actor = self.actor_from(&p.actor);
@@ -335,6 +354,10 @@ struct RememberParams {
     when: Option<Vec<(String, String)>>,
     fields: Option<Vec<(String, String)>>,
     supersedes: Option<Vec<String>>,
+    /// Content origin; `external` marks the claim untrusted (scenario 10).
+    origin: Option<Origin>,
+    /// Optional URL evidence pointers (for example issue comments).
+    evidence_urls: Option<Vec<String>>,
     idempotency_key: Option<String>,
     #[serde(default)]
     actor: ActorParams,
@@ -411,6 +434,16 @@ struct FeedbackParams {
     id: String,
     outcome: Outcome,
     note: Option<String>,
+    idempotency_key: Option<String>,
+    #[serde(default)]
+    actor: ActorParams,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromoteParams {
+    id: String,
+    /// Wider target scope (for example `team:acme` from `project:acme/api`).
+    scope: Scope,
     idempotency_key: Option<String>,
     #[serde(default)]
     actor: ActorParams,

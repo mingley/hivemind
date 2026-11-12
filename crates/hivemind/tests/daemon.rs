@@ -86,6 +86,7 @@ fn hive_mcp_tool_names_in_declaration_order() {
         HiveMcp::retract_tool_attr(),
         HiveMcp::forget_tool_attr(),
         HiveMcp::feedback_tool_attr(),
+        HiveMcp::promote_tool_attr(),
         HiveMcp::changes_since_tool_attr(),
     ];
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
@@ -98,6 +99,7 @@ fn hive_mcp_tool_names_in_declaration_order() {
             "retract",
             "forget",
             "feedback",
+            "promote",
             "changes_since",
         ]
     );

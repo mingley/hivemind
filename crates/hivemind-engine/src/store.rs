@@ -19,6 +19,7 @@ use hivemind_core::hygiene;
 use hivemind_core::{
     Actor, ActorKind, BlobHash, ClaimData, ClaimId, ClaimKind, EVENT_VERSION, EdgeKind, Event,
     EventBody, EventId, EvidenceRef, Origin, Outcome, RetractReason, Scope, Status, Timestamp,
+    check_promotion,
 };
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -813,6 +814,48 @@ impl Store {
                 reason,
             })
         })
+    }
+
+    /// Widens a claim's scope when trust policy allows it.
+    ///
+    /// Refuses untrusted / agent-only / tainted-without-human-review claims
+    /// ([`check_promotion`]). On success, asserts a sibling claim at `to` that
+    /// supersedes the original — no new [`EventBody`] variant, so erasure can
+    /// add `ClaimForgotten` without fighting this change.
+    pub fn promote(
+        &self,
+        actor: &Actor,
+        claim: ClaimId,
+        to: Scope,
+        idempotency_key: Option<String>,
+    ) -> Result<Receipt> {
+        to.validate()
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        let (offset, from_scope, trust) = {
+            let state = self.state.read();
+            let row = state
+                .row(&claim)
+                .ok_or_else(|| Error::NotFound(format!("claim {claim}")))?;
+            if row.status != Status::Active {
+                return Err(Error::Conflict(format!(
+                    "{claim} is {}; only active claims can be promoted",
+                    row.status
+                )));
+            }
+            let belief = state.belief(row);
+            (row.offset, row.scope.clone(), belief.trust)
+        };
+        check_promotion(trust, &from_scope, &to).map_err(|e| Error::Invalid(e.to_string()))?;
+        let mut data = self.load_claim_data(offset)?;
+        data.scope = to;
+        self.remember(
+            actor,
+            Remember {
+                data,
+                supersedes: vec![claim],
+                idempotency_key,
+            },
+        )
     }
 
     /// Adds a typed relation between two claims.
