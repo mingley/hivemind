@@ -100,6 +100,25 @@ impl BlobStore {
         self.path(hash).exists()
     }
 
+    /// Delete a blob file if present. Missing files are fine (idempotent erase).
+    /// Used by claim erasure when no remaining claim references the artifact.
+    pub fn delete(&self, hash: &BlobHash) -> Result<bool> {
+        let path = self.path(hash);
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                if self.sync {
+                    if let Some(shard) = path.parent() {
+                        let _ = fsutil::sync_dir(shard);
+                    }
+                    let _ = fsutil::sync_dir(&self.root);
+                }
+                Ok(true)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(Error::Io(e)),
+        }
+    }
+
     /// Re-hashes every blob. Returns the number checked and any problems found.
     pub fn verify_all(&self) -> Result<(usize, Vec<String>)> {
         let mut checked = 0;

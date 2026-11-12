@@ -17,6 +17,8 @@ str_enum! {
         Invalidated => "invalidated",
         /// Knowledge changed: this was wrong, or was recorded wrongly.
         Retracted => "retracted",
+        /// Privacy erasure: payload purged; only a tombstone remains.
+        Forgotten => "forgotten",
     }
 }
 

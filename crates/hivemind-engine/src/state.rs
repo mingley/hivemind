@@ -57,6 +57,16 @@ pub struct Invalidation {
     pub by: Arc<str>,
 }
 
+/// Tombstone left after privacy erasure (`forget`).
+#[derive(Clone, Debug, Serialize)]
+pub struct Forgetting {
+    pub reason: String,
+    pub recorded_at: Timestamp,
+    pub by: Arc<str>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub purged_blobs: Vec<BlobHash>,
+}
+
 /// One line of support: a principal and the evidence they offered. Lines that
 /// share a principal or any evidence collapse into one independent group.
 #[derive(Clone, Debug)]
@@ -82,8 +92,8 @@ pub struct ClaimRow {
     pub evidence_count: usize,
     pub citations_count: usize,
     pub derived_from: Vec<ClaimId>,
-    /// Provenance evidence keys, used when crediting support edges.
-    evidence_keys: BTreeSet<Arc<str>>,
+    /// Provenance evidence keys, used when crediting support edges and erasure.
+    pub(crate) evidence_keys: BTreeSet<Arc<str>>,
     pub author_principal: Arc<str>,
     pub author_kind: ActorKind,
     pub author_agent: Option<Arc<str>>,
@@ -98,6 +108,7 @@ pub struct ClaimRow {
     pub superseded_at: Option<Timestamp>,
     pub retraction: Option<Retraction>,
     pub invalidation: Option<Invalidation>,
+    pub forgetting: Option<Forgetting>,
     /// Derived from external content, directly or through `derived_from`.
     pub tainted: bool,
     pub feedback: FeedbackTally,
@@ -276,6 +287,67 @@ impl State {
 
     pub fn claims(&self) -> &[ClaimRow] {
         &self.claims
+    }
+
+    /// Purge projection content for a forgotten claim. Keeps the id/tombstone
+    /// so audit and reopen stay consistent; removes searchable payload.
+    fn shred_claim(
+        &mut self,
+        claim: &ClaimId,
+        doc: u32,
+        reason: &str,
+        at: Timestamp,
+        by: &Arc<str>,
+        purged_blobs: &[BlobHash],
+    ) {
+        self.lexical.clear_doc(doc);
+        self.vectors.remove(doc);
+
+        // Drop entity postings so forgotten claims cannot be found by entity.
+        let entities: Vec<Arc<str>> = self.row(claim).map(|r| r.about.clone()).unwrap_or_default();
+        for entity in &entities {
+            if let Some(list) = self.by_entity.get_mut(entity) {
+                list.retain(|d| *d != doc);
+            }
+        }
+
+        // Scrub edge payloads that may quote forgotten content.
+        if let Some(indexes) = self.edges_by_claim.get(claim).cloned() {
+            for idx in indexes {
+                if let Some(edge) = self.edges.get_mut(idx as usize) {
+                    edge.note = None;
+                    edge.evidence.clear();
+                }
+            }
+        }
+
+        for hash in purged_blobs {
+            self.artifacts.remove(hash);
+        }
+
+        if let Some(row) = self.row_mut(claim) {
+            row.status = Status::Forgotten;
+            row.statement_cache.clear();
+            row.statement_truncated = false;
+            row.about.clear();
+            row.applies_when.clear();
+            row.evidence_count = 0;
+            row.citations_count = 0;
+            row.derived_from.clear();
+            row.evidence_keys.clear();
+            row.supports.clear();
+            row.feedback = FeedbackTally::default();
+            row.retraction = None;
+            row.invalidation = None;
+            row.last_validated_at = None;
+            row.tainted = false;
+            row.forgetting = Some(Forgetting {
+                reason: reason.to_owned(),
+                recorded_at: at,
+                by: Arc::clone(by),
+                purged_blobs: purged_blobs.to_vec(),
+            });
+        }
     }
 
     pub fn ack(&self, principal: &str, key: &str) -> Option<Ack> {
@@ -486,6 +558,16 @@ impl State {
                 }
                 _ => known = false,
             },
+            EventBody::ClaimForgotten {
+                claim,
+                reason,
+                purged_blobs,
+            } => match self.row(claim).map(|r| r.doc) {
+                Some(doc) => {
+                    self.shred_claim(claim, doc, reason, at, &by, purged_blobs);
+                }
+                None => known = false,
+            },
         }
         if !known {
             self.skipped += 1;
@@ -588,6 +670,7 @@ impl State {
             superseded_at: None,
             retraction: None,
             invalidation: None,
+            forgetting: None,
             tainted,
             feedback: FeedbackTally::default(),
             last_validated_at: (authored_by_human && !tainted).then_some(event.recorded_at),

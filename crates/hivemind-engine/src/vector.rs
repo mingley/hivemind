@@ -184,6 +184,18 @@ impl VectorIndex {
         Ok(())
     }
 
+    /// Drop a document's vector (claim erasure). Idempotent when missing.
+    pub fn remove(&mut self, doc: u32) {
+        let Some(idx) = self.by_doc.remove(&doc) else {
+            return;
+        };
+        self.rows.swap_remove(idx);
+        if let Some(swapped) = self.rows.get(idx) {
+            self.by_doc.insert(swapped.doc, idx);
+        }
+        self.ann = None;
+    }
+
     /// Exact cosine search. When the space is int8, scores from codes first,
     /// then optionally rescored with f32 for the top `rescore` hits.
     pub fn search(&self, query: &[f32], limit: usize, rescore: usize) -> Vec<(u32, f32)> {

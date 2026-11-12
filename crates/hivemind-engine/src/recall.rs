@@ -14,7 +14,7 @@ use hivemind_core::{
 };
 use serde::Serialize;
 
-use crate::state::{Belief, ClaimRow, FeedbackTally, Invalidation, Retraction, State};
+use crate::state::{Belief, ClaimRow, FeedbackTally, Forgetting, Invalidation, Retraction, State};
 use crate::vector;
 
 pub const DEFAULT_LIMIT: usize = 8;
@@ -162,6 +162,8 @@ pub struct ClaimDetail {
     pub retraction: Option<Retraction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invalidation: Option<Invalidation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forgetting: Option<Forgetting>,
     pub tainted: bool,
     pub feedback: FeedbackTally,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -245,6 +247,10 @@ pub(crate) fn recall(state: &State, query: &Query) -> Recall {
                 .iter()
                 .any(|a| query.about.iter().any(|q| q.as_str() == a.as_ref()))
         {
+            continue;
+        }
+        // Forgotten claims are never recalled, even with history (privacy).
+        if row.status == Status::Forgotten {
             continue;
         }
         if row.status != Status::Active && !query.include_history {
@@ -371,6 +377,9 @@ fn expand_temporal_neighbors(
             continue;
         };
         if existing.contains(&row.id) {
+            continue;
+        }
+        if row.status == Status::Forgotten {
             continue;
         }
         if row.status != Status::Active && !query.include_history {
@@ -554,6 +563,7 @@ pub(crate) fn detail_with_citations(
         superseded_by: row.superseded_by,
         retraction: row.retraction.clone(),
         invalidation: row.invalidation.clone(),
+        forgetting: row.forgetting.clone(),
         tainted: row.tainted,
         feedback: row.feedback.clone(),
         last_validated_at: row.last_validated_at,

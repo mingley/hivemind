@@ -598,6 +598,146 @@ impl Store {
         let _ = state.vectors.upsert_f32(doc, values);
     }
 
+    /// Privacy erasure: append a tombstone, purge the claim payload from the
+    /// log and projections, and delete blobs that nothing else references.
+    /// Forgotten claims are never returned by recall (including `--history`).
+    /// Idempotent when the claim is already forgotten: re-runs the physical
+    /// purge in case a prior attempt was interrupted.
+    pub fn forget(
+        &self,
+        actor: &Actor,
+        claim: ClaimId,
+        reason: &str,
+        idempotency_key: Option<String>,
+    ) -> Result<Receipt> {
+        let reason = clean_note(reason)?;
+        if reason.trim().is_empty() {
+            return Err(Error::Invalid(
+                "give a reason for forgetting the claim (privacy / compliance audit)".into(),
+            ));
+        }
+
+        let (offset, kind, already) = {
+            let state = self.state.read();
+            let row = state
+                .row(&claim)
+                .ok_or_else(|| Error::NotFound(format!("claim {claim}")))?;
+            (row.offset, row.kind, row.status == Status::Forgotten)
+        };
+
+        // Collect exclusive blob hashes while the assert event still has them
+        // (or from the redacted stub / tombstone on a re-run).
+        let mut candidate_blobs = BTreeSet::new();
+        if let Ok(data) = self.load_claim_data(offset) {
+            for evidence in &data.provenance.evidence {
+                if let EvidenceRef::Artifact(hash) = evidence {
+                    candidate_blobs.insert(*hash);
+                }
+            }
+        }
+        {
+            let state = self.state.read();
+            if let Some(row) = state.row(&claim)
+                && let Some(forgetting) = &row.forgetting
+            {
+                candidate_blobs.extend(forgetting.purged_blobs.iter().copied());
+            }
+            // Edges touching this claim may also cite artifacts.
+            for edge in state.edges_of(&claim) {
+                for evidence in &edge.evidence {
+                    if let EvidenceRef::Artifact(hash) = evidence {
+                        candidate_blobs.insert(*hash);
+                    }
+                }
+            }
+        }
+
+        let purged_blobs: Vec<BlobHash> = {
+            let state = self.state.read();
+            candidate_blobs
+                .into_iter()
+                .filter(|hash| blob_exclusive_to(&state, *hash, claim))
+                .collect()
+        };
+
+        let receipt = if already {
+            // Re-purge without a second tombstone.
+            Receipt {
+                event: EventId::generate(),
+                offset: self.next_offset(),
+                claim: Some(claim),
+                replayed: true,
+                similar: Vec::new(),
+            }
+        } else {
+            self.commit_event(actor, idempotency_key, |_| {
+                Ok(EventBody::ClaimForgotten {
+                    claim,
+                    reason: reason.clone(),
+                    purged_blobs: purged_blobs.clone(),
+                })
+            })?
+        };
+
+        // Physical purge of the ClaimAsserted payload (history rewrite).
+        self.redact_claim_asserted(offset, kind)?;
+
+        // Best-effort blob delete for exclusive artifacts.
+        for hash in &purged_blobs {
+            let _ = self.blobs.delete(hash);
+        }
+
+        // Snapshots may still hold pre-redaction bytes; drop them so reopen
+        // replays the redacted log.
+        let _ = snapshot::invalidate_all(&self.dir.join("snapshots"));
+
+        Ok(receipt)
+    }
+
+    /// Rewrite the ClaimAsserted at `offset` to a forgotten stub (padded in place).
+    fn redact_claim_asserted(&self, offset: u64, kind: ClaimKind) -> Result<()> {
+        let view = self.log.lock().view();
+        let rows = view.read(offset, 1)?;
+        let Some((got, bytes)) = rows.into_iter().next() else {
+            return Err(Error::corruption(
+                self.dir.join("log"),
+                offset,
+                format!("no event at offset {offset}"),
+            ));
+        };
+        if got != offset {
+            return Err(Error::corruption(
+                self.dir.join("log"),
+                offset,
+                format!("expected offset {offset}, read {got}"),
+            ));
+        }
+        let mut event = codec::decode(offset, &bytes)?;
+        match &mut event.body {
+            EventBody::ClaimAsserted { data, .. } => {
+                // Keep supersedes ids (graph integrity); strip every payload field.
+                **data = ClaimData::forgotten_stub(kind);
+            }
+            EventBody::ClaimForgotten { .. } => {
+                // Already a tombstone slot somehow; nothing to redact.
+                return Ok(());
+            }
+            other => {
+                return Err(Error::corruption(
+                    self.dir.join("log"),
+                    offset,
+                    format!(
+                        "offset {offset} is {}; expected claim_asserted for erasure",
+                        other.type_name()
+                    ),
+                ));
+            }
+        }
+        let redacted = codec::encode(&event)?;
+        self.log.lock().rewrite_event(offset, &redacted)?;
+        Ok(())
+    }
+
     /// Marks a claim as wrong (`wrong`), recorded wrongly (`misrecorded`), or a
     /// duplicate. Optionally points at the claim that corrects it.
     pub fn retract(
@@ -923,6 +1063,7 @@ impl Store {
 
     /// The full (L1) view of a claim. With a context, applicability is evaluated too.
     /// Reloads the claim body from the log by the keydir offset.
+    /// Forgotten claims return `None` (payload purged; use stats / log tombstones).
     pub fn get(&self, id: &ClaimId, context: Option<&Context>) -> Option<ClaimDetail> {
         self.get_with_workspace(id, context, None)
     }
@@ -937,6 +1078,9 @@ impl Store {
         let (offset, _) = {
             let state = self.state.read();
             let row = state.row(id)?;
+            if row.status == Status::Forgotten {
+                return None;
+            }
             (row.offset, row.id)
         };
         let data = self.load_claim_data(offset).ok()?;
@@ -1286,6 +1430,31 @@ fn check_actor(actor: &Actor) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// True when no non-forgotten claim (other than `except`) still cites `hash`.
+fn blob_exclusive_to(state: &State, hash: BlobHash, except: ClaimId) -> bool {
+    let key = hash.to_string();
+    for row in state.claims() {
+        if row.id == except || row.status == Status::Forgotten {
+            continue;
+        }
+        if row.evidence_keys.iter().any(|k| k.as_ref() == key) {
+            return false;
+        }
+    }
+    for edge in &state.edges {
+        // Edges on the claim being forgotten are scrubbed with it.
+        if edge.from == except || edge.to == except {
+            continue;
+        }
+        for evidence in &edge.evidence {
+            if matches!(evidence, EvidenceRef::Artifact(h) if *h == hash) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn clean_work_item(work_item: &str) -> Result<String> {

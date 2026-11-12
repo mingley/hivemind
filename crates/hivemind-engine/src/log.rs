@@ -292,6 +292,99 @@ impl Log {
             end: self.next_offset,
         }
     }
+
+    /// Overwrite one acknowledged event's bytes in place (erasure).
+    ///
+    /// `new_bytes` must be no longer than the original encoding; shorter
+    /// payloads are padded with ASCII spaces so the surrounding record layout
+    /// (and later events) stay put. The record CRC is recalculated. This is the
+    /// only intentional history rewrite; it is used by [`crate::Store::forget`].
+    pub fn rewrite_event(&mut self, offset: u64, new_bytes: &[u8]) -> Result<()> {
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
+        if offset >= self.next_offset {
+            return Err(Error::NotFound(format!("event offset {offset}")));
+        }
+        let loc = find_event_location(&self.dir, &self.segments, offset)?;
+        if new_bytes.len() > loc.event_len {
+            return Err(Error::Invalid(format!(
+                "redacted event at offset {offset} is {} bytes; original was {} (erasure stubs must shrink or stay the same size)",
+                new_bytes.len(),
+                loc.event_len
+            )));
+        }
+        let mut padded = new_bytes.to_vec();
+        padded.resize(loc.event_len, b' ');
+
+        let path = segment_path(&self.dir, loc.segment_base);
+        let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
+        file.seek(SeekFrom::Start(loc.record_pos))?;
+        let mut record = vec![0u8; loc.record_len];
+        file.read_exact(&mut record)?;
+        if record_crc(&record) != u32_at(&record, 4) {
+            return Err(Error::corruption(
+                &path,
+                loc.record_pos,
+                "record checksum mismatch before erasure rewrite",
+            ));
+        }
+        let event_rel = (loc.event_pos - loc.record_pos) as usize;
+        record[event_rel..event_rel + loc.event_len].copy_from_slice(&padded);
+        let crc = record_crc(&record);
+        record[4..8].copy_from_slice(&crc.to_le_bytes());
+
+        file.seek(SeekFrom::Start(loc.record_pos))?;
+        file.write_all(&record)?;
+        if self.durability == Durability::Fsync {
+            file.sync_data()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct EventLocation {
+    segment_base: u64,
+    /// File byte offset of the record header.
+    record_pos: u64,
+    record_len: usize,
+    /// File byte offset of the event payload (after its length prefix).
+    event_pos: u64,
+    event_len: usize,
+}
+
+fn find_event_location(dir: &Path, segments: &[u64], target: u64) -> Result<EventLocation> {
+    let start = segments
+        .partition_point(|base| *base <= target)
+        .saturating_sub(1);
+    for &base in &segments[start..] {
+        let path = segment_path(dir, base);
+        let mut reader = SegmentReader::open(&path, base)?;
+        loop {
+            let record_pos = reader.pos;
+            match reader.step()? {
+                Step::Record => {
+                    for &(offset, start, end) in &reader.events {
+                        if offset == target {
+                            return Ok(EventLocation {
+                                segment_base: base,
+                                record_pos,
+                                record_len: reader.record.len(),
+                                event_pos: record_pos + start as u64,
+                                event_len: end - start,
+                            });
+                        }
+                    }
+                }
+                Step::End => break,
+                Step::Bad { position, reason } => {
+                    return Err(Error::corruption(path, position, reason));
+                }
+            }
+        }
+    }
+    Err(Error::NotFound(format!("event offset {target}")))
 }
 
 /// A consistent, read-only view of the log up to the offset that was

@@ -878,3 +878,100 @@ fn a_manifest_without_its_log_is_refused() {
         Err(Error::Format(_))
     ));
 }
+
+/// P0-D: forget purges payload from projections and the log; reopen stays forgotten.
+#[test]
+fn forget_erases_claim_from_recall_and_survives_reopen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let secret = "customer SSN 078-05-1120 must never surface in recall";
+    let claim_id = {
+        let store = Store::open(tmp.path(), options()).unwrap();
+        let a = agent("privacy-officer");
+        let mut data = claim(ClaimKind::Fact, secret);
+        data.about.push("subject:customer-42".into());
+        let (blob, _) = store
+            .put_artifact(
+                &a,
+                b"raw transcript with PII",
+                None,
+                Some("note.txt".into()),
+                Origin::Agent,
+            )
+            .unwrap();
+        data.provenance.evidence.push(EvidenceRef::Artifact(blob));
+        let id = store
+            .remember(&a, Remember::new(data))
+            .unwrap()
+            .claim
+            .unwrap();
+        assert_eq!(
+            store.recall(&query("078-05-1120")).cards.len(),
+            1,
+            "claim must be findable before forget"
+        );
+        assert!(store.artifact(&blob).is_ok());
+
+        store
+            .forget(&a, id, "GDPR erasure request #42", None)
+            .unwrap();
+
+        assert!(
+            store.recall(&query("078-05-1120")).cards.is_empty(),
+            "forgotten claim must not be recalled"
+        );
+        assert!(
+            store
+                .recall(&Query {
+                    text: "078-05-1120".into(),
+                    include_history: true,
+                    ..Query::default()
+                })
+                .cards
+                .is_empty(),
+            "forgotten claims stay hidden even with history"
+        );
+        assert!(store.get(&id, None).is_none());
+        assert!(
+            matches!(store.artifact(&blob), Err(Error::NotFound(_))),
+            "exclusive blob must be deleted"
+        );
+        assert_eq!(
+            store
+                .stats()
+                .by_status
+                .get("forgotten")
+                .copied()
+                .unwrap_or(0),
+            1
+        );
+        // Log payload must not retain the secret after in-place redact.
+        let raw = store.events(0, 100).unwrap();
+        let joined = raw
+            .iter()
+            .map(|(_, e)| serde_json::to_string(e).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !joined.contains("078-05-1120"),
+            "secret must not remain in decoded log events"
+        );
+        assert!(joined.contains("claim_forgotten") || joined.contains("forgotten"));
+        id
+    };
+
+    // Reopen: still forgotten, still not recalled, blob still gone.
+    let store = Store::open(tmp.path(), options()).unwrap();
+    assert!(store.recall(&query("078-05-1120")).cards.is_empty());
+    assert!(store.get(&claim_id, None).is_none());
+    let row_status = store
+        .stats()
+        .by_status
+        .get("forgotten")
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(row_status, 1);
+    // Idempotent re-forget.
+    store
+        .forget(&agent("privacy-officer"), claim_id, "retry purge", None)
+        .unwrap();
+}

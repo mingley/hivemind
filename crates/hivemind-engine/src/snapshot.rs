@@ -110,6 +110,27 @@ pub fn write(
     })
 }
 
+/// Drop every sealed snapshot under `snapshots_dir`. Used after erasure so a
+/// reopen cannot rebuild projections from a pack that still holds redacted
+/// claim payloads. Missing directories are fine.
+pub fn invalidate_all(snapshots_dir: &Path) -> Result<usize> {
+    if !snapshots_dir.exists() {
+        return Ok(0);
+    }
+    let mut removed = 0usize;
+    for entry in fs::read_dir(snapshots_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(".hsnap") || name.ends_with(".hsnap.tmp") || name.ends_with(".tmp") {
+            fs::remove_file(&path)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /// Load the newest readable snapshot under `snapshots_dir`, if any.
 pub fn load_latest(snapshots_dir: &Path) -> Result<Option<Snapshot>> {
     if !snapshots_dir.exists() {

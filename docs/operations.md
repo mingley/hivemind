@@ -152,10 +152,72 @@ The image entrypoint is `hivemind serve --listen 0.0.0.0:8787 --root /var/lib/hi
 Override with e.g. `docker run … hivemind:local daemon` for a single-store
 daemon (publish no HTTP ports in that case; use a volume for `HIVEMIND_DIR`).
 
+## Erasure / forget (privacy SLA)
+
+`forget` is the only operation that **rewrites history**. It is for privacy,
+compliance, or secrets — not for correcting wrong knowledge (use `retract` /
+`invalidate` / supersede instead). See [03-memory-model.md](03-memory-model.md)
+lifecycle table.
+
+### What forget does
+
+1. Appends an audited `claim_forgotten` tombstone (`claim`, `reason`, actor,
+   time, and any exclusively referenced blob hashes).
+2. Redacts the original `claim_asserted` log payload in place to a
+   `[forgotten]` stub (statement, evidence, payload, and scope cleared).
+3. Removes the claim from lexical / vector projections and entity indexes.
+   Forgotten claims are **never** returned by `recall`, including with
+   `--history` / `history: true`.
+4. Deletes blob files that nothing else still references (content-addressed
+   store; physical delete). Crypto-shredding is not used today because blobs
+   are not per-key encrypted; delete is the erasure mechanism that matches
+   the current blob design.
+5. Invalidates projection snapshots so a reopen cannot rebuild from a pack
+   that still held the pre-redaction bytes.
+
+### Operator steps
+
+```bash
+# Local store / daemon
+hivemind forget clm_<id_or_prefix> --reason "GDPR erasure request #123"
+
+# Via MCP (stdio or Streamable HTTP /mcp)
+# tool: forget  args: { "id": "clm_…", "reason": "…" }
+
+# Daemon JSON-RPC method name: forget
+```
+
+Require a non-empty `--reason` (stored on the tombstone for audit). Re-running
+`forget` on an already-forgotten claim is idempotent and re-attempts physical
+purge if a prior run was interrupted.
+
+### SLA
+
+| Guarantee | Bound |
+|---|---|
+| Online store (this process holds the lock) | Purge of log payload, projections, and exclusive blobs completes in the `forget` call before the receipt is returned. Target: **seconds** for a single claim on a laptop-sized store. |
+| After crash mid-forget | Tombstone may exist while payload redact/blob delete is incomplete. Re-run `forget` with the same claim id; purge is idempotent. |
+| Cold backups / shipped segments | **Not covered** by online forget. Operators must expire or re-forget against restored copies under their backup retention policy. Document retention separately per deployment. |
+| Derived copies outside hivemind | Transcripts, agent context windows, and forks are out of band; this SLA covers the hivemind store directory only. |
+
+Legal note: whether physical delete (or future crypto-shredding) meets a given
+jurisdiction’s erasure standard is a compliance decision, not a product claim.
+
+### Verify
+
+```bash
+hivemind recall "<distinctive secret token>" --history   # expect 0 cards
+hivemind show clm_<id>                                   # expect not found
+hivemind stats                                           # by_status.forgotten >= 1
+hivemind verify                                          # should stay clean after purge
+```
+
 ## Status framing
 
 Ops packaging (CI gates, release artifacts, `/health` plus `/readyz` `/metrics`,
 structured logs, Dockerfile) has landed. Product gaps that remain out of scope
 for this doc: HA, authenticated multi-tenant isolation hardening beyond bearer
 OAuth, and proving local MCP under restrictive sandboxes. Local MCP setup:
-[setup-mcp.md](setup-mcp.md).
+[setup-mcp.md](setup-mcp.md). Erasure (`forget`) and its online SLA are
+documented above; backup retention remains an operator policy.
+

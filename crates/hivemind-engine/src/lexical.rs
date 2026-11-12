@@ -158,6 +158,19 @@ impl LexicalIndex {
         self.total_len += u64::from(len);
     }
 
+    /// Remove a document from every posting list and zero its length.
+    /// Document ids stay dense; the slot is left empty so later docs keep their ids.
+    pub fn clear_doc(&mut self, doc: u32) {
+        let Some(len) = self.doc_len.get_mut(doc as usize) else {
+            return;
+        };
+        self.total_len = self.total_len.saturating_sub(u64::from(*len));
+        *len = 0;
+        for list in &mut self.postings {
+            list.retain(|(d, _)| *d != doc);
+        }
+    }
+
     pub fn docs(&self) -> usize {
         self.doc_len.len()
     }

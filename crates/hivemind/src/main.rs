@@ -68,6 +68,8 @@ enum Command {
     Show(ShowArgs),
     /// Mark a claim as wrong, misrecorded, or a duplicate.
     Retract(RetractArgs),
+    /// Erase a claim for privacy/compliance (purges payload and exclusive blobs).
+    Forget(ForgetArgs),
     /// Record that a claim stopped being true.
     Invalidate(InvalidateArgs),
     /// Relate two claims.
@@ -286,6 +288,17 @@ struct RetractArgs {
     /// The claim that corrects this one.
     #[arg(long, value_name = "CLAIM")]
     corrected_by: Option<String>,
+    #[arg(long)]
+    idempotency_key: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct ForgetArgs {
+    /// Claim ID or unique prefix.
+    id: String,
+    /// Why this claim is being erased (privacy / compliance audit).
+    #[arg(long)]
+    reason: String,
     #[arg(long)]
     idempotency_key: Option<String>,
 }
@@ -621,6 +634,11 @@ fn run(cli: Cli) -> Result<()> {
             )?;
             out.receipt(&receipt, "retracted")
         }
+        Command::Forget(args) => {
+            let id = store.resolve(&args.id)?;
+            let receipt = store.forget(&actor, id, &args.reason, args.idempotency_key)?;
+            out.receipt(&receipt, "forgotten")
+        }
         Command::Invalidate(args) => {
             let id = store.resolve(&args.id)?;
             let at = args.at.as_deref().map(parse_time).transpose()?;
@@ -853,6 +871,18 @@ fn run_via_daemon(
                 .call_daemon("retract", params)?
                 .expect("daemon backend");
             daemon_receipt(&out, &result, "retracted")
+        }
+        Command::Forget(args) => {
+            let params = json!({
+                "id": args.id,
+                "reason": args.reason,
+                "idempotency_key": args.idempotency_key,
+                "actor": actor_params,
+            });
+            let result = backend
+                .call_daemon("forget", params)?
+                .expect("daemon backend");
+            daemon_receipt(&out, &result, "forgotten")
         }
         Command::Invalidate(args) => {
             let params = json!({

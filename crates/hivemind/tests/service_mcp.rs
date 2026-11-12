@@ -19,7 +19,7 @@ fn open_service() -> (tempfile::TempDir, Service) {
 }
 
 #[test]
-fn mcp_tools_list_six_names_in_deterministic_order() {
+fn mcp_tools_list_names_in_deterministic_order() {
     // rmcp's ToolRouter::list_all sorts by name; that sorted order is what
     // clients see and must stay stable for prompt-cache friendliness.
     let names: Vec<String> = HiveMcp::tool_router()
@@ -32,6 +32,7 @@ fn mcp_tools_list_six_names_in_deterministic_order() {
         vec![
             "changes_since",
             "feedback",
+            "forget",
             "recall",
             "remember",
             "retract",

@@ -116,6 +116,15 @@ fn default_retract() -> String {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ForgetArgs {
+    /// Claim ID or unique prefix to erase.
+    pub id: String,
+    /// Privacy / compliance reason (audited on the tombstone).
+    pub reason: String,
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct FeedbackArgs {
     pub id: String,
     /// helpful, unhelpful, harmful, or not_applicable.
@@ -257,6 +266,24 @@ impl HiveMcp {
         ok_json(result)
     }
 
+    /// Privacy erasure: purge claim payload from log, projections, and exclusive blobs.
+    #[tool(
+        name = "forget",
+        description = "Erase a claim for privacy/compliance. Purges payload from the log and indexes; deletes exclusive blobs. Forgotten claims never appear in recall. Requires a reason."
+    )]
+    async fn forget(
+        &self,
+        Parameters(args): Parameters<ForgetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = json!({
+            "id": args.id,
+            "reason": args.reason,
+            "idempotency_key": args.idempotency_key,
+        });
+        let result = self.call_daemon("forget", params)?;
+        ok_json(result)
+    }
+
     /// Report how a claim worked out when applied.
     #[tool(
         name = "feedback",
@@ -310,7 +337,7 @@ impl ServerHandler for HiveMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             format!(
-                "{EVIDENCE_PREAMBLE} Tools: remember, recall, show, retract, feedback, changes_since."
+                "{EVIDENCE_PREAMBLE} Tools: remember, recall, show, retract, forget, feedback, changes_since."
             ),
         )
     }

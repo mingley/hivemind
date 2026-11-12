@@ -169,6 +169,16 @@ pub enum EventBody {
     },
     /// Releases a lease; token must match the current fence.
     LeaseReleased { work_item: String, token: u64 },
+    /// Privacy erasure: claim payload is (or will be) purged from the log,
+    /// projections, and exclusive blobs. Only this tombstone plus a redacted
+    /// `ClaimAsserted` stub remain durable.
+    ClaimForgotten {
+        claim: ClaimId,
+        reason: String,
+        /// Blob hashes deleted with this claim because nothing else referenced them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        purged_blobs: Vec<BlobHash>,
+    },
 }
 
 impl EventBody {
@@ -184,6 +194,7 @@ impl EventBody {
             EventBody::LeaseAcquired { .. } => "lease_acquired",
             EventBody::LeaseRenewed { .. } => "lease_renewed",
             EventBody::LeaseReleased { .. } => "lease_released",
+            EventBody::ClaimForgotten { .. } => "claim_forgotten",
         }
     }
 
@@ -193,7 +204,8 @@ impl EventBody {
             EventBody::ClaimAsserted { claim, .. }
             | EventBody::ClaimInvalidated { claim, .. }
             | EventBody::ClaimRetracted { claim, .. }
-            | EventBody::FeedbackRecorded { claim, .. } => Some(*claim),
+            | EventBody::FeedbackRecorded { claim, .. }
+            | EventBody::ClaimForgotten { claim, .. } => Some(*claim),
             EventBody::EdgeAdded { from, .. } => Some(*from),
             EventBody::ArtifactStored { .. }
             | EventBody::Recovered { .. }

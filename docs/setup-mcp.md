@@ -199,7 +199,8 @@ servers started inside Copilot's sandbox show as sandboxed in
 
 ## Verify from an agent
 
-Once the client lists the `hivemind` server and its six tools:
+Once the client lists the `hivemind` server and its tools (`remember`,
+`recall`, `show`, `retract`, `forget`, `feedback`, `changes_since`):
 
 1. Call `remember` with a short statement, a `kind`, and a `scope` such as
    `project:github.com/you/repo`.
@@ -208,6 +209,8 @@ Once the client lists the `hivemind` server and its six tools:
 3. Call `show` with the claim id or a unique prefix.
 4. Call `changes_since` with `from` set to `0` (or the previous cursor) and
    confirm the remember event appears.
+5. Prefer `retract` for wrong knowledge; use `forget` only for privacy
+   erasure (see [operations.md](operations.md#erasure--forget-privacy-sla)).
 
 If tools are missing, check that `command` is an absolute path to the built
 `hivemind` binary, that `hivemindd` is its sibling or on `PATH`, and that

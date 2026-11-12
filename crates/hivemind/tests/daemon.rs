@@ -84,6 +84,7 @@ fn hive_mcp_tool_names_in_declaration_order() {
         HiveMcp::recall_tool_attr(),
         HiveMcp::show_tool_attr(),
         HiveMcp::retract_tool_attr(),
+        HiveMcp::forget_tool_attr(),
         HiveMcp::feedback_tool_attr(),
         HiveMcp::changes_since_tool_attr(),
     ];
@@ -95,6 +96,7 @@ fn hive_mcp_tool_names_in_declaration_order() {
             "recall",
             "show",
             "retract",
+            "forget",
             "feedback",
             "changes_since",
         ]

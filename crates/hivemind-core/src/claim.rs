@@ -264,6 +264,13 @@ impl ClaimData {
         }
     }
 
+    /// Stub left in the log after [`crate::EventBody::ClaimForgotten`] purges a
+    /// claim's payload. Keeps the claim id's assertion event decodable without
+    /// retaining statement, evidence, or structured fields.
+    pub fn forgotten_stub(kind: ClaimKind) -> Self {
+        Self::new(kind, "[forgotten]", Scope::Global)
+    }
+
     /// Text indexed for lexical search: the statement, entity keys, and string
     /// values in the payload.
     pub fn index_text(&self) -> String {

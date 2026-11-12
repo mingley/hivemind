@@ -156,6 +156,30 @@ fn prerelease_toolchains_still_match() {
 }
 
 #[test]
+fn forget_removes_claim_from_recall() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let remembered = json(hivemind(dir).args([
+        "remember",
+        "secret preference: favorite color is chartreuse-neptune",
+        "--scope",
+        "project:acme/api",
+    ]));
+    let id = remembered["claim"].as_str().unwrap();
+    let before = json(hivemind(dir).args(["recall", "chartreuse-neptune"]));
+    assert_eq!(before["cards"].as_array().unwrap().len(), 1);
+
+    let forgotten = json(hivemind(dir).args(["forget", id, "--reason", "user deletion request"]));
+    assert_eq!(forgotten["claim"], id);
+
+    let after = json(hivemind(dir).args(["recall", "chartreuse-neptune", "--history"]));
+    assert_eq!(after["cards"].as_array().unwrap().len(), 0);
+
+    let show = hivemind(dir).args(["show", id]).output().unwrap();
+    assert!(!show.status.success());
+}
+
+#[test]
 fn torn_writes_are_reported_on_open() {
     let tmp = tempfile::tempdir().unwrap();
     run(hivemind(tmp.path()).args(["remember", "first claim", "--scope", "project:a"]));

@@ -65,6 +65,7 @@ impl Service {
             "recall" => self.recall(params),
             "show" => self.show(params),
             "retract" => self.retract(params),
+            "forget" => self.forget(params),
             "invalidate" => self.invalidate(params),
             "link" => self.link(params),
             "feedback" => self.feedback(params),
@@ -185,6 +186,16 @@ impl Service {
             corrected_by,
             p.idempotency_key,
         )?;
+        Ok(serde_json::to_value(receipt)?)
+    }
+
+    fn forget(&self, params: Value) -> Result<Value> {
+        let p: ForgetParams = serde_json::from_value(params)?;
+        let actor = self.actor_from(&p.actor);
+        let id = self.store.resolve(&p.id)?;
+        let receipt = self
+            .store
+            .forget(&actor, id, &p.reason, p.idempotency_key)?;
         Ok(serde_json::to_value(receipt)?)
     }
 
@@ -360,6 +371,15 @@ struct RetractParams {
     reason: Option<RetractReason>,
     note: Option<String>,
     corrected_by: Option<String>,
+    idempotency_key: Option<String>,
+    #[serde(default)]
+    actor: ActorParams,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgetParams {
+    id: String,
+    reason: String,
     idempotency_key: Option<String>,
     #[serde(default)]
     actor: ActorParams,
