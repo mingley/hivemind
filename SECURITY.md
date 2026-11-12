@@ -18,7 +18,7 @@ assumes and enforces today.
 | Secret | Env / flag | Role |
 |---|---|---|
 | Bootstrap bearer | `HIVEMIND_TOKEN` / `--token` | Admin/ops bearer; also accepted on protected routes. Principal: `bootstrap`. |
-| OAuth client secret | `HIVEMIND_OAUTH_CLIENT_SECRET` / `--oauth-client-secret` | Confidential client at `/oauth/token`. |
+| OAuth client secret | `HIVEMIND_OAUTH_CLIENT_SECRET` / `--oauth-client-secret` | Pre-configured confidential client at `/oauth/token`. DCR may issue additional per-client secrets. |
 | Signing key | `HIVEMIND_SIGNING_KEY` / `--signing-key` | HMAC-BLAKE3 key for sealing access tokens. |
 
 `serve` refuses to start if any are empty or if any two are equal. Do **not**
@@ -27,19 +27,29 @@ reuse the bootstrap token as the client secret or signing key.
 ## Authentication and authorization
 
 - **Open:** `/health`, `/readyz`, `/metrics`, `/healthz`, OAuth metadata,
-  `/oauth/authorize`, `/oauth/token` (token endpoint is rate-limited; see below).
+  `/oauth/authorize`, `/oauth/token`, `/oauth/register` (token and register are
+  rate-limited; see below).
 - **Protected:** `/v1/tenants…`, `/mcp` — require `Authorization: Bearer …`.
 - **OAuth grants:** `client_credentials`, `authorization_code` + PKCE S256, and
-  `refresh_token` against one pre-registered client (`HIVEMIND_OAUTH_CLIENT_ID`).
+  `refresh_token` against the pre-registered confidential client
+  (`HIVEMIND_OAUTH_CLIENT_ID`) **and** dynamically registered clients.
+- **Dynamic Client Registration (RFC 7591):** `POST /oauth/register` accepts a
+  minimal JSON body (`redirect_uris`, `client_name`,
+  `token_endpoint_auth_method`, `grant_types`). Prefer
+  `client_secret_basic` / `client_secret_post` (issues `client_secret`) or
+  `none` (public). Default grants: `authorization_code` + `refresh_token`.
+  Registered clients are **in-memory** (lost on process restart; single-node
+  residual). External IdP federation remains out of scope.
 - **Access tokens:** sealed claims (`sub`, `iss`, `exp`, …) with a **short TTL**
   (default 300s, `HIVEMIND_ACCESS_TOKEN_TTL_SECS`).
 - **Refresh tokens:** opaque server-side handles issued on `authorization_code`
   (and rotated on `refresh_token`). Default TTL 7 days
-  (`HIVEMIND_REFRESH_TOKEN_TTL_SECS`). Confidential client secret required for
-  refresh. `client_credentials` stays access-only (re-auth with the secret).
-  DCR and external IdP federation remain out of scope (P1).
+  (`HIVEMIND_REFRESH_TOKEN_TTL_SECS`). Confidential clients must present their
+  secret; public DCR clients (`none`) refresh with `client_id` only.
+  `client_credentials` stays access-only (re-auth with the secret).
 - **Rate limits:** in-process token buckets on `/oauth/token` (per IP+`client_id`,
-  default 60/min via `HIVEMIND_TOKEN_RATE_PER_MINUTE`) and authenticated
+  default 60/min via `HIVEMIND_TOKEN_RATE_PER_MINUTE`), `/oauth/register` (per
+  IP, default 10/min via `HIVEMIND_REGISTER_RATE_PER_MINUTE`), and authenticated
   HTTP/MCP/gRPC RPC (per IP+principal, default 600/min via
   `HIVEMIND_RPC_RATE_PER_MINUTE`). Excess → HTTP `429` / gRPC
   `RESOURCE_EXHAUSTED`. Ops probes are exempt. Set a knob to `0` to disable.
@@ -70,13 +80,15 @@ unless you add an external policy layer.
 | Threat | Mitigation / residual |
 |---|---|
 | Stolen bootstrap token | Full admin on the shared API until rotated; keep off laptops in prod; rotate independently of signing key. |
-| Stolen client secret | Can mint access tokens for the registered client until rotated. |
+| Stolen client secret | Can mint access tokens for that client until rotated (configured or DCR). |
 | Stolen signing key | Attacker can forge access tokens; rotate and invalidate by changing the key (existing tokens fail MAC). |
+| Open DCR abuse | Anyone who can reach `/oauth/register` can create clients; rate-limited per IP. Residual: many source IPs / shared NAT; no admin approval step. |
+| DCR client loss on restart | In-memory registry only; process restart drops dynamic clients (and their refresh handles). Re-register after restart. |
 | Principal spoofing on shared RPC | Blocked: token `sub` overwrites request/env actor. |
 | Cross-tenant read/write | Blocked at storage partition; not blocked by per-principal ACL. |
 | Cleartext on the wire | `REQUIRE_TLS` + reverse-proxy contract; residual if operators skip both. |
 | Token replay within TTL | Short access TTL; refresh handles rotate on use (replay of spent refresh fails). In-memory refresh store (process restart invalidates). |
-| Token / RPC abuse (credential stuffing, noisy neighbors) | Per IP+client / IP+principal rate limits; residual if many source IPs or shared NAT. |
+| Token / RPC / register abuse | Per IP+client / IP / IP+principal rate limits; residual if many source IPs or shared NAT. |
 | Poisoned memory as instructions | Separate trust/quarantine work (P0-C); retrieval is evidence, not instructions. |
 
 ## Reporting

@@ -173,6 +173,13 @@ struct ServeArgs {
         env = "HIVEMIND_TOKEN_RATE_PER_MINUTE"
     )]
     token_rate_per_minute: u64,
+    /// `/oauth/register` sustained rate per IP (0 disables).
+    #[arg(
+        long,
+        default_value_t = hivemind::ratelimit::DEFAULT_REGISTER_RATE_PER_MINUTE,
+        env = "HIVEMIND_REGISTER_RATE_PER_MINUTE"
+    )]
+    register_rate_per_minute: u64,
     /// Authenticated HTTP/MCP/gRPC RPC sustained rate per IP+principal (0 disables).
     #[arg(
         long,
@@ -564,6 +571,7 @@ fn run(cli: Cli) -> Result<()> {
                 require_tls,
                 grpc_listen,
                 token_rate_per_minute: args.token_rate_per_minute,
+                register_rate_per_minute: args.register_rate_per_minute,
                 rpc_rate_per_minute: args.rpc_rate_per_minute,
             }));
         }

@@ -2,9 +2,11 @@
 
 Status: 2026-11-12. Local stdio MCP for agents; shared-service ops
 (health, metrics, serve, container, forget SLA) live in
-[operations.md](operations.md). Product status and residual risks (HA, IdP/DCR,
-RSS, F1–F12, LazyFS CI, LICENSE) live in the
-[README](../README.md#residual-risks).
+[operations.md](operations.md). Product status and residual risks (HA, external
+IdP, RSS, F1–F12, LazyFS CI, LICENSE) live in the
+[README](../README.md#residual-risks). Shared-service MCP clients can use
+`POST /oauth/register` (RFC 7591 DCR) instead of a pre-shared client secret;
+see [operations.md](operations.md) and [SECURITY.md](../SECURITY.md).
 
 Engine RSS mitigations (keydir, interning, token-type caps) are **landed**.
 Post-mitigation re-measure: ~207 MB RSS after replaying 100k synthetic

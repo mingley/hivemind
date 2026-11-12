@@ -5,12 +5,12 @@
 //! - `/readyz` — readiness (default tenant store open; additive)
 //! - `/metrics` — Prometheus text exposition (additive)
 //! - `/healthz` — optional alias of `/health` (not a required rename)
-//! - `/.well-known/oauth-*` and `/oauth/*` — OAuth 2.1 AS + protected resource
+//! - `/.well-known/oauth-*` and `/oauth/*` — OAuth 2.1 AS + DCR + protected resource
 //! - `/mcp` — MCP Streamable HTTP for `--default-tenant`
 //! - `/v1/tenants…` — JSON API (bearer: OAuth access token or bootstrap token)
 //!
-//! Rate limits (in-process token buckets): `/oauth/token` and authenticated
-//! RPC/MCP paths. Ops probes above are exempt.
+//! Rate limits (in-process token buckets): `/oauth/token`, `/oauth/register`, and
+//! authenticated RPC/MCP paths. Ops probes above are exempt.
 //!
 //! Transport: this process speaks plaintext HTTP. Production deployments MUST
 //! terminate TLS at a reverse proxy (or equivalent) and set
@@ -40,8 +40,8 @@ use tracing::info;
 
 use crate::mcp::HiveMcp;
 use crate::oauth::{
-    self, AuthIdentity, DEFAULT_ACCESS_TOKEN_TTL_SECS, OAuthConfig, OAuthState, TokenForm,
-    validate_transport,
+    self, AuthIdentity, ClientRegistrationRequest, DEFAULT_ACCESS_TOKEN_TTL_SECS, OAuthConfig,
+    OAuthState, TokenForm, validate_transport,
 };
 use crate::obs;
 use crate::ratelimit::{self, RateClass, RateLimitConfig, RateLimited, RateLimiter};
@@ -75,6 +75,8 @@ pub struct ServeArgs {
     pub grpc_listen: Option<SocketAddr>,
     /// Sustained `/oauth/token` requests per minute per IP+client_id (`0` = off).
     pub token_rate_per_minute: u64,
+    /// Sustained `/oauth/register` requests per minute per IP (`0` = off).
+    pub register_rate_per_minute: u64,
     /// Sustained authenticated RPC requests per minute per IP+principal (`0` = off).
     pub rpc_rate_per_minute: u64,
 }
@@ -114,6 +116,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
 
     let limiter = Arc::new(RateLimiter::new(RateLimitConfig {
         token_per_minute: args.token_rate_per_minute,
+        register_per_minute: args.register_rate_per_minute,
         rpc_per_minute: args.rpc_rate_per_minute,
     }));
 
@@ -198,6 +201,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         )
         .route("/oauth/authorize", get(oauth_authorize))
         .route("/oauth/token", post(oauth_token))
+        .route("/oauth/register", post(oauth_register))
         .merge(protected)
         .layer(middleware::from_fn(http_metrics))
         .with_state(state.clone());
@@ -229,6 +233,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         issuer = %issuer,
         require_tls = args.require_tls,
         token_rate_per_minute = args.token_rate_per_minute,
+        register_rate_per_minute = args.register_rate_per_minute,
         rpc_rate_per_minute = args.rpc_rate_per_minute,
         "hivemind HTTP service listening"
     );
@@ -486,6 +491,19 @@ async fn oauth_token(
     }
     let value = state.oauth.exchange_token(&form).map_err(ApiError::from)?;
     Ok(Json(value))
+}
+
+async fn oauth_register(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(req): Json<ClientRegistrationRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let key = addr.ip().to_string();
+    if let Err(limited) = state.limiter.check(RateClass::Register, &key) {
+        return Err(ApiError::rate_limited(limited));
+    }
+    let value = state.oauth.register_client(&req).map_err(ApiError::from)?;
+    Ok((StatusCode::CREATED, Json(value)))
 }
 
 fn urlencoding_minimal(s: &str) -> String {

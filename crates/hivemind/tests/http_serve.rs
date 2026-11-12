@@ -24,6 +24,7 @@ fn test_args(root: std::path::PathBuf, addr: SocketAddr) -> ServeArgs {
         require_tls: false,
         grpc_listen: None,
         token_rate_per_minute: hivemind::ratelimit::DEFAULT_TOKEN_RATE_PER_MINUTE,
+        register_rate_per_minute: hivemind::ratelimit::DEFAULT_REGISTER_RATE_PER_MINUTE,
         rpc_rate_per_minute: hivemind::ratelimit::DEFAULT_RPC_RATE_PER_MINUTE,
     }
 }
@@ -127,6 +128,13 @@ async fn health_oauth_metadata_and_rpc() {
     assert!(
         grants.iter().any(|g| g.as_str() == Some("refresh_token")),
         "AS metadata should advertise refresh_token: {as_body}"
+    );
+    assert!(
+        as_body["registration_endpoint"]
+            .as_str()
+            .unwrap()
+            .contains("/oauth/register"),
+        "AS metadata should advertise DCR: {as_body}"
     );
 
     let pr_meta = client
@@ -617,6 +625,228 @@ async fn rate_limit_token_and_rpc_return_429_ops_exempt() {
         .await
         .unwrap();
     assert_eq!(metrics.status(), 200);
+
+    serve.abort();
+}
+
+/// P1: RFC 7591 DCR — register confidential client → client_credentials → RPC.
+#[tokio::test]
+async fn dcr_register_confidential_then_client_credentials_rpc() {
+    let root = tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let args = test_args(root.path().to_path_buf(), addr);
+    let serve = tokio::spawn(http::serve(args));
+    wait_for(addr).await;
+    let client = reqwest::Client::new();
+
+    let reg = client
+        .post(format!("http://{addr}/oauth/register"))
+        .json(&json!({
+            "client_name": "dcr-machine",
+            "token_endpoint_auth_method": "client_secret_basic",
+            "grant_types": ["client_credentials"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reg.status(), 201, "{}", reg.text().await.unwrap());
+    let reg_body: serde_json::Value = reg.json().await.unwrap();
+    let client_id = reg_body["client_id"].as_str().unwrap().to_owned();
+    let client_secret = reg_body["client_secret"].as_str().unwrap().to_owned();
+    assert!(client_id.starts_with("dcr_"));
+
+    let token_resp = client
+        .post(format!("http://{addr}/oauth/token"))
+        .form(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        token_resp.status(),
+        200,
+        "{}",
+        token_resp.text().await.unwrap()
+    );
+    let access = token_resp.json::<serde_json::Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let hello = client
+        .get(format!("http://{addr}/v1/tenants/default/hello"))
+        .header("Authorization", format!("Bearer {access}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hello.status(), 200, "{}", hello.text().await.unwrap());
+
+    // Configured confidential client still works alongside DCR.
+    let configured = oauth_access(&client, addr, "client-secret").await;
+    assert!(!configured.is_empty());
+
+    serve.abort();
+}
+
+/// P1: RFC 7591 DCR — public client register → authorize + PKCE → refresh.
+#[tokio::test]
+async fn dcr_register_public_authorize_token_refresh() {
+    let root = tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let args = test_args(root.path().to_path_buf(), addr);
+    let serve = tokio::spawn(http::serve(args));
+    wait_for(addr).await;
+    let client = reqwest::Client::new();
+
+    let redirect = "http://127.0.0.1/cb";
+    let reg = client
+        .post(format!("http://{addr}/oauth/register"))
+        .json(&json!({
+            "redirect_uris": [redirect],
+            "client_name": "dcr-mcp",
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reg.status(), 201, "{}", reg.text().await.unwrap());
+    let reg_body: serde_json::Value = reg.json().await.unwrap();
+    let client_id = reg_body["client_id"].as_str().unwrap().to_owned();
+    assert!(reg_body.get("client_secret").is_none());
+
+    let verifier = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+    // S256(verifier) precomputed (matches oauth unit tests).
+    let challenge = "fR4ifSAEy-7Mu6g7FHZulPKrtjqdAnUCwRFAJt2JFsA";
+    let no_redirect = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let authorize = no_redirect
+        .get(format!("http://{addr}/oauth/authorize"))
+        .query(&[
+            ("response_type", "code"),
+            ("client_id", client_id.as_str()),
+            ("redirect_uri", redirect),
+            ("code_challenge", challenge),
+            ("code_challenge_method", "S256"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        authorize.status().is_redirection(),
+        "{}",
+        authorize.status()
+    );
+    let location = authorize
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let code = location
+        .split("code=")
+        .nth(1)
+        .and_then(|s| s.split('&').next())
+        .expect("authorize redirect must include code");
+
+    let token_resp = client
+        .post(format!("http://{addr}/oauth/token"))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", client_id.as_str()),
+            ("code", code),
+            ("redirect_uri", redirect),
+            ("code_verifier", verifier),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        token_resp.status(),
+        200,
+        "{}",
+        token_resp.text().await.unwrap()
+    );
+    let first = token_resp.json::<serde_json::Value>().await.unwrap();
+    let refresh = first["refresh_token"].as_str().unwrap().to_owned();
+
+    let refreshed = client
+        .post(format!("http://{addr}/oauth/token"))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_id.as_str()),
+            ("refresh_token", refresh.as_str()),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        refreshed.status(),
+        200,
+        "{}",
+        refreshed.text().await.unwrap()
+    );
+    let access = refreshed.json::<serde_json::Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let tenants = client
+        .get(format!("http://{addr}/v1/tenants"))
+        .header("Authorization", format!("Bearer {access}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tenants.status(), 200);
+
+    serve.abort();
+}
+
+/// P1: excess `/oauth/register` returns 429.
+#[tokio::test]
+async fn dcr_register_rate_limit_returns_429() {
+    let root = tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let mut args = test_args(root.path().to_path_buf(), addr);
+    args.register_rate_per_minute = 2;
+    let serve = tokio::spawn(http::serve(args));
+    wait_for(addr).await;
+    let client = reqwest::Client::new();
+
+    let mut statuses = Vec::new();
+    for _ in 0..5 {
+        let resp = client
+            .post(format!("http://{addr}/oauth/register"))
+            .json(&json!({
+                "client_name": "burst",
+                "token_endpoint_auth_method": "client_secret_basic",
+                "grant_types": ["client_credentials"]
+            }))
+            .send()
+            .await
+            .unwrap();
+        statuses.push(resp.status().as_u16());
+    }
+    assert!(
+        statuses.iter().filter(|&&s| s == 201).count() >= 1,
+        "expected some register successes: {statuses:?}"
+    );
+    assert!(
+        statuses.contains(&429),
+        "expected register 429 after bursting: {statuses:?}"
+    );
 
     serve.abort();
 }

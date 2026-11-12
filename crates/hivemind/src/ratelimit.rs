@@ -1,7 +1,8 @@
 //! In-process token-bucket rate limits for the shared service.
 //!
-//! Two classes:
+//! Classes:
 //! - **token** — `/oauth/token` (keyed by client IP + OAuth client_id)
+//! - **register** — `/oauth/register` (keyed by client IP)
 //! - **rpc** — authenticated HTTP `/v1…`, `/mcp`, and gRPC RPCs (keyed by
 //!   client IP + principal)
 //!
@@ -14,12 +15,15 @@ use std::time::{Duration, Instant};
 
 /// Default sustained rate for `/oauth/token` (per IP+client_id).
 pub const DEFAULT_TOKEN_RATE_PER_MINUTE: u64 = 60;
+/// Default sustained rate for `/oauth/register` (per IP).
+pub const DEFAULT_REGISTER_RATE_PER_MINUTE: u64 = 10;
 /// Default sustained rate for authenticated RPC paths (per IP+principal).
 pub const DEFAULT_RPC_RATE_PER_MINUTE: u64 = 600;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RateClass {
     Token,
+    Register,
     Rpc,
 }
 
@@ -27,6 +31,8 @@ pub enum RateClass {
 pub struct RateLimitConfig {
     /// Sustained requests per minute for `/oauth/token`. `0` disables.
     pub token_per_minute: u64,
+    /// Sustained requests per minute for `/oauth/register`. `0` disables.
+    pub register_per_minute: u64,
     /// Sustained requests per minute for authenticated RPC. `0` disables.
     pub rpc_per_minute: u64,
 }
@@ -35,6 +41,7 @@ impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
             token_per_minute: DEFAULT_TOKEN_RATE_PER_MINUTE,
+            register_per_minute: DEFAULT_REGISTER_RATE_PER_MINUTE,
             rpc_per_minute: DEFAULT_RPC_RATE_PER_MINUTE,
         }
     }
@@ -114,6 +121,7 @@ impl RateLimiter {
     pub fn check(&self, class: RateClass, key: &str) -> Result<(), RateLimited> {
         let per_minute = match class {
             RateClass::Token => self.config.token_per_minute,
+            RateClass::Register => self.config.register_per_minute,
             RateClass::Rpc => self.config.rpc_per_minute,
         };
         if per_minute == 0 {
@@ -121,6 +129,7 @@ impl RateLimiter {
         }
         let map_key = match class {
             RateClass::Token => format!("token:{key}"),
+            RateClass::Register => format!("register:{key}"),
             RateClass::Rpc => format!("rpc:{key}"),
         };
         let mut guard = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
@@ -164,6 +173,7 @@ mod tests {
     fn allows_under_limit_then_denies() {
         let limiter = RateLimiter::new(RateLimitConfig {
             token_per_minute: 3,
+            register_per_minute: 3,
             rpc_per_minute: 3,
         });
         for _ in 0..3 {
@@ -177,16 +187,20 @@ mod tests {
         assert!(limiter.check(RateClass::Token, "127.0.0.1:other").is_ok());
         // RPC class is independent of token class.
         assert!(limiter.check(RateClass::Rpc, "127.0.0.1:cli").is_ok());
+        // Register class is independent.
+        assert!(limiter.check(RateClass::Register, "127.0.0.1").is_ok());
     }
 
     #[test]
     fn zero_disables() {
         let limiter = RateLimiter::new(RateLimitConfig {
             token_per_minute: 0,
+            register_per_minute: 0,
             rpc_per_minute: 0,
         });
         for _ in 0..100 {
             assert!(limiter.check(RateClass::Token, "x").is_ok());
+            assert!(limiter.check(RateClass::Register, "x").is_ok());
             assert!(limiter.check(RateClass::Rpc, "x").is_ok());
         }
     }

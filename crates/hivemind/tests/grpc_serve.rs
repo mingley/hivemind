@@ -113,6 +113,7 @@ async fn grpc_rpc_rate_limit_resource_exhausted() {
         oauth,
         limiter: Arc::new(RateLimiter::new(RateLimitConfig {
             token_per_minute: 60,
+            register_per_minute: 10,
             rpc_per_minute: 2,
         })),
         no_fsync: true,

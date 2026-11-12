@@ -3,17 +3,18 @@
 //! Supports:
 //! - Authorization Server Metadata ([RFC 8414](https://datatracker.ietf.org/doc/html/rfc8414))
 //! - Protected Resource Metadata ([RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728))
+//! - Dynamic Client Registration ([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591))
 //! - `client_credentials` (machine agents; access token only)
 //! - `authorization_code` + PKCE S256 (interactive / MCP clients; access + refresh)
-//! - `refresh_token` (confidential client; rotates refresh tokens)
+//! - `refresh_token` (confidential clients; public DCR clients with `none`; rotates)
 //!
 //! Access tokens are HMAC-BLAKE3 sealed JSON claims with a short TTL (default
 //! 5 minutes). Refresh tokens are opaque server-side handles with a longer TTL
 //! (default 7 days). Bootstrap bearer, OAuth client secret, and signing key are
 //! **separate** secrets — do not reuse the bootstrap token as the HMAC key.
 //!
-//! External IdP federation and dynamic client registration remain out of scope
-//! (P1).
+//! Dynamically registered clients live in-process (single-node residual: lost on
+//! restart). External IdP federation remains out of scope.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -51,11 +52,58 @@ pub struct OAuthConfig {
     pub refresh_token_ttl_secs: u64,
 }
 
+/// In-process registered OAuth client (configured bootstrap or RFC 7591 DCR).
+#[derive(Clone, Debug)]
+pub struct RegisteredClient {
+    pub client_id: String,
+    pub client_secret: Option<String>,
+    pub client_name: Option<String>,
+    pub redirect_uris: Vec<String>,
+    pub token_endpoint_auth_method: String,
+    pub grant_types: Vec<String>,
+    /// When true, any redirect_uri is accepted (pre-configured serve client).
+    pub open_redirect: bool,
+    pub issued_at: u64,
+}
+
+impl RegisteredClient {
+    pub fn is_confidential(&self) -> bool {
+        self.token_endpoint_auth_method != "none"
+    }
+
+    pub fn allows_grant(&self, grant: &str) -> bool {
+        self.grant_types.iter().any(|g| g == grant)
+    }
+
+    pub fn allows_redirect(&self, uri: &str) -> bool {
+        self.open_redirect || self.redirect_uris.iter().any(|u| u == uri)
+    }
+}
+
+/// Minimal RFC 7591 registration request body.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ClientRegistrationRequest {
+    #[serde(default)]
+    pub redirect_uris: Vec<String>,
+    #[serde(default)]
+    pub client_name: Option<String>,
+    #[serde(default)]
+    pub token_endpoint_auth_method: Option<String>,
+    #[serde(default)]
+    pub grant_types: Option<Vec<String>>,
+    #[serde(default)]
+    pub response_types: Option<Vec<String>>,
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct OAuthState {
     pub config: OAuthConfig,
     codes: Arc<Mutex<HashMap<String, AuthCode>>>,
     refresh: Arc<Mutex<HashMap<String, RefreshRecord>>>,
+    /// Dynamically registered clients (in-memory; process-local).
+    clients: Arc<Mutex<HashMap<String, RegisteredClient>>>,
 }
 
 impl std::fmt::Debug for OAuthState {
@@ -108,7 +156,41 @@ impl OAuthState {
             config,
             codes: Arc::new(Mutex::new(HashMap::new())),
             refresh: Arc::new(Mutex::new(HashMap::new())),
+            clients: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Pre-configured confidential client from serve flags / env.
+    fn configured_client(&self) -> RegisteredClient {
+        RegisteredClient {
+            client_id: self.config.client_id.clone(),
+            client_secret: Some(self.config.client_secret.clone()),
+            client_name: Some("hivemind configured client".into()),
+            redirect_uris: Vec::new(),
+            token_endpoint_auth_method: "client_secret_basic".into(),
+            grant_types: vec![
+                "authorization_code".into(),
+                "client_credentials".into(),
+                "refresh_token".into(),
+            ],
+            open_redirect: true,
+            issued_at: 0,
+        }
+    }
+
+    /// Resolve a client_id to the configured client or a DCR registration.
+    pub fn lookup_client(&self, client_id: &str) -> Result<RegisteredClient> {
+        if client_id == self.config.client_id {
+            return Ok(self.configured_client());
+        }
+        let guard = self
+            .clients
+            .lock()
+            .map_err(|_| anyhow::anyhow!("oauth client lock poisoned"))?;
+        guard
+            .get(client_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown client_id"))
     }
 
     pub fn authorization_server_metadata(&self) -> Value {
@@ -116,6 +198,7 @@ impl OAuthState {
             "issuer": self.config.issuer,
             "authorization_endpoint": format!("{}/oauth/authorize", self.config.issuer),
             "token_endpoint": format!("{}/oauth/token", self.config.issuer),
+            "registration_endpoint": format!("{}/oauth/register", self.config.issuer),
             "response_types_supported": ["code"],
             "grant_types_supported": [
                 "authorization_code",
@@ -149,8 +232,12 @@ impl OAuthState {
         code_challenge_method: &str,
         resource: Option<&str>,
     ) -> Result<String> {
-        if client_id != self.config.client_id {
-            bail!("unknown client_id");
+        let client = self.lookup_client(client_id)?;
+        if !client.allows_grant("authorization_code") {
+            bail!("client not allowed authorization_code");
+        }
+        if !client.allows_redirect(redirect_uri) {
+            bail!("redirect_uri not registered for client");
         }
         if code_challenge_method != "S256" {
             bail!("only S256 PKCE is supported");
@@ -176,14 +263,109 @@ impl OAuthState {
         Ok(code)
     }
 
+    /// RFC 7591 Dynamic Client Registration (open; rate-limited at HTTP).
+    pub fn register_client(&self, req: &ClientRegistrationRequest) -> Result<Value> {
+        let auth_method = req
+            .token_endpoint_auth_method
+            .as_deref()
+            .unwrap_or("client_secret_basic");
+        match auth_method {
+            "client_secret_basic" | "client_secret_post" | "none" => {}
+            other => bail!("unsupported token_endpoint_auth_method: {other}"),
+        }
+
+        let grant_types = req
+            .grant_types
+            .clone()
+            .unwrap_or_else(|| vec!["authorization_code".into(), "refresh_token".into()]);
+        if grant_types.is_empty() {
+            bail!("grant_types required");
+        }
+        for g in &grant_types {
+            match g.as_str() {
+                "authorization_code" | "client_credentials" | "refresh_token" => {}
+                other => bail!("unsupported grant_type: {other}"),
+            }
+        }
+        if grant_types.iter().any(|g| g == "client_credentials") && auth_method == "none" {
+            bail!("client_credentials requires a confidential client");
+        }
+        if grant_types.iter().any(|g| g == "refresh_token")
+            && !grant_types.iter().any(|g| g == "authorization_code")
+        {
+            bail!("refresh_token requires authorization_code grant");
+        }
+
+        let needs_redirect = grant_types.iter().any(|g| g == "authorization_code");
+        if needs_redirect && req.redirect_uris.is_empty() {
+            bail!("redirect_uris required for authorization_code clients");
+        }
+        for uri in &req.redirect_uris {
+            if uri.trim().is_empty() {
+                bail!("redirect_uris must be non-empty");
+            }
+        }
+        if let Some(types) = &req.response_types {
+            for t in types {
+                if t != "code" {
+                    bail!("unsupported response_type: {t}");
+                }
+            }
+        }
+
+        let client_id = format!("dcr_{}", random_token(16));
+        let client_secret = if auth_method == "none" {
+            None
+        } else {
+            Some(random_token(32))
+        };
+        let issued_at = now_secs();
+        let record = RegisteredClient {
+            client_id: client_id.clone(),
+            client_secret: client_secret.clone(),
+            client_name: req.client_name.clone(),
+            redirect_uris: req.redirect_uris.clone(),
+            token_endpoint_auth_method: auth_method.to_owned(),
+            grant_types: grant_types.clone(),
+            open_redirect: false,
+            issued_at,
+        };
+        {
+            let mut guard = self
+                .clients
+                .lock()
+                .map_err(|_| anyhow::anyhow!("oauth client lock poisoned"))?;
+            guard.insert(client_id.clone(), record);
+        }
+
+        let mut body = json!({
+            "client_id": client_id,
+            "client_id_issued_at": issued_at,
+            "redirect_uris": req.redirect_uris,
+            "grant_types": grant_types,
+            "response_types": ["code"],
+            "token_endpoint_auth_method": auth_method,
+            "scope": req.scope.clone().unwrap_or_else(|| "hivemind".into()),
+        });
+        if let Some(name) = &req.client_name {
+            body["client_name"] = Value::String(name.clone());
+        }
+        if let Some(secret) = client_secret {
+            body["client_secret"] = Value::String(secret);
+            body["client_secret_expires_at"] = json!(0);
+        }
+        Ok(body)
+    }
+
     pub fn exchange_token(&self, form: &TokenForm) -> Result<Value> {
         let (client_id, client_secret) = resolve_client_auth(form, &self.config)?;
+        let client = self.lookup_client(&client_id)?;
+        authenticate_client(&client, &client_secret)?;
+        if !client.allows_grant(&form.grant_type) {
+            bail!("grant_type not allowed for client");
+        }
         match form.grant_type.as_str() {
             "client_credentials" => {
-                if client_id != self.config.client_id || client_secret != self.config.client_secret
-                {
-                    bail!("invalid client credentials");
-                }
                 // Machine clients re-authenticate with the secret; no refresh.
                 let token = self.issue_access_token(&client_id, form.resource.as_deref())?;
                 Ok(token_response(
@@ -220,10 +402,6 @@ impl OAuthState {
                 if record.client_id != client_id {
                     bail!("client_id mismatch");
                 }
-                // Public clients may omit secret; confidential must match.
-                if !client_secret.is_empty() && client_secret != self.config.client_secret {
-                    bail!("invalid client secret");
-                }
                 if record.redirect_uri != redirect_uri {
                     bail!("redirect_uri mismatch");
                 }
@@ -232,19 +410,20 @@ impl OAuthState {
                 }
                 let resource = form.resource.as_deref().or(record.resource.as_deref());
                 let access = self.issue_access_token(&client_id, resource)?;
-                let refresh = self.issue_refresh_token(&client_id, &client_id, resource)?;
+                let refresh = if client.allows_grant("refresh_token") {
+                    Some(self.issue_refresh_token(&client_id, &client_id, resource)?)
+                } else {
+                    None
+                };
                 Ok(token_response(
                     &access,
                     self.config.access_token_ttl_secs,
-                    Some(&refresh),
+                    refresh.as_deref(),
                 ))
             }
             "refresh_token" => {
-                // Confidential client only (OAuth norms for this AS).
-                if client_id != self.config.client_id || client_secret != self.config.client_secret
-                {
-                    bail!("invalid client credentials");
-                }
+                // Confidential clients must present secret (enforced above).
+                // Public DCR clients (`none`) refresh with client_id only.
                 let presented = form
                     .refresh_token
                     .as_deref()
@@ -381,6 +560,21 @@ fn resolve_client_auth(form: &TokenForm, config: &OAuthConfig) -> Result<(String
         .unwrap_or_else(|| config.client_id.clone());
     let secret = form.client_secret.clone().unwrap_or_default();
     Ok((id, secret))
+}
+
+fn authenticate_client(client: &RegisteredClient, presented_secret: &str) -> Result<()> {
+    if client.is_confidential() {
+        let expected = client
+            .client_secret
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("client missing secret"))?;
+        if presented_secret.is_empty() || presented_secret != expected {
+            bail!("invalid client credentials");
+        }
+    } else if !presented_secret.is_empty() {
+        bail!("public client must not present client_secret");
+    }
+    Ok(())
 }
 
 /// Parse `Authorization: Basic base64(id:secret)` into (id, secret).
@@ -664,6 +858,105 @@ mod tests {
         let meta = state().authorization_server_metadata();
         let grants = meta["grant_types_supported"].as_array().unwrap();
         assert!(grants.iter().any(|g| g.as_str() == Some("refresh_token")));
+        assert!(
+            meta["registration_endpoint"]
+                .as_str()
+                .unwrap()
+                .ends_with("/oauth/register")
+        );
+    }
+
+    #[test]
+    fn dcr_confidential_client_credentials() {
+        let s = state();
+        let reg = s
+            .register_client(&ClientRegistrationRequest {
+                redirect_uris: vec![],
+                client_name: Some("machine".into()),
+                token_endpoint_auth_method: Some("client_secret_basic".into()),
+                grant_types: Some(vec!["client_credentials".into()]),
+                ..ClientRegistrationRequest::default()
+            })
+            .unwrap();
+        let client_id = reg["client_id"].as_str().unwrap();
+        let client_secret = reg["client_secret"].as_str().unwrap();
+        let resp = s
+            .exchange_token(&TokenForm {
+                grant_type: "client_credentials".into(),
+                client_id: Some(client_id.into()),
+                client_secret: Some(client_secret.into()),
+                ..TokenForm::default()
+            })
+            .unwrap();
+        let id = s
+            .authenticate(resp["access_token"].as_str().unwrap(), "x")
+            .unwrap();
+        assert_eq!(id.principal, client_id);
+        assert!(resp.get("refresh_token").is_none());
+    }
+
+    #[test]
+    fn dcr_public_auth_code_and_refresh() {
+        let s = state();
+        let redirect = "http://127.0.0.1/cb";
+        let reg = s
+            .register_client(&ClientRegistrationRequest {
+                redirect_uris: vec![redirect.into()],
+                client_name: Some("mcp-public".into()),
+                token_endpoint_auth_method: Some("none".into()),
+                grant_types: Some(vec!["authorization_code".into(), "refresh_token".into()]),
+                ..ClientRegistrationRequest::default()
+            })
+            .unwrap();
+        let client_id = reg["client_id"].as_str().unwrap().to_owned();
+        assert!(reg.get("client_secret").is_none());
+
+        let verifier = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let code = s
+            .mint_authorize_code(&client_id, redirect, &challenge, "S256", None)
+            .unwrap();
+        let first = s
+            .exchange_token(&TokenForm {
+                grant_type: "authorization_code".into(),
+                client_id: Some(client_id.clone()),
+                code: Some(code),
+                redirect_uri: Some(redirect.into()),
+                code_verifier: Some(verifier.into()),
+                ..TokenForm::default()
+            })
+            .unwrap();
+        let refresh = first["refresh_token"].as_str().unwrap().to_owned();
+        let refreshed = s
+            .exchange_token(&TokenForm {
+                grant_type: "refresh_token".into(),
+                client_id: Some(client_id.clone()),
+                refresh_token: Some(refresh),
+                ..TokenForm::default()
+            })
+            .unwrap();
+        let id = s
+            .authenticate(refreshed["access_token"].as_str().unwrap(), "x")
+            .unwrap();
+        assert_eq!(id.principal, client_id);
+
+        // Foreign redirect rejected at authorize.
+        assert!(
+            s.mint_authorize_code(&client_id, "http://evil/cb", &challenge, "S256", None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn dcr_rejects_public_client_credentials() {
+        let s = state();
+        let err = s.register_client(&ClientRegistrationRequest {
+            redirect_uris: vec![],
+            token_endpoint_auth_method: Some("none".into()),
+            grant_types: Some(vec!["client_credentials".into()]),
+            ..ClientRegistrationRequest::default()
+        });
+        assert!(err.is_err());
     }
 
     #[test]
