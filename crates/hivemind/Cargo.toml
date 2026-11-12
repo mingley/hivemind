@@ -17,6 +17,12 @@ path = "src/main.rs"
 name = "hivemindd"
 path = "src/bin/hivemindd.rs"
 
+[features]
+default = []
+# Forward the engine's optional Model2Vec embedder (see docs/operations.md).
+embeddings = ["hivemind-engine/embeddings"]
+embeddings-hf = ["hivemind-engine/embeddings-hf"]
+
 [dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.8", features = ["http1", "json", "tokio"] }

@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tonic::{Request, Response, Status};
 use tracing::info;
 
+use crate::embedder::EmbedderArgs;
 use crate::oauth::OAuthState;
 use crate::ratelimit::{self, RateClass, RateLimiter};
 use crate::service::Service;
@@ -34,6 +35,7 @@ struct GrpcState {
     limiter: Arc<RateLimiter>,
     durability: Durability,
     stores: Arc<Mutex<HashMap<String, Arc<Service>>>>,
+    embedder: EmbedderArgs,
 }
 
 impl std::fmt::Debug for GrpcState {
@@ -52,6 +54,7 @@ pub struct GrpcArgs {
     pub oauth: OAuthState,
     pub limiter: Arc<RateLimiter>,
     pub no_fsync: bool,
+    pub embedder: EmbedderArgs,
 }
 
 pub async fn serve(args: GrpcArgs) -> Result<()> {
@@ -67,6 +70,7 @@ pub async fn serve(args: GrpcArgs) -> Result<()> {
             Durability::Fsync
         },
         stores: Arc::new(Mutex::new(HashMap::new())),
+        embedder: args.embedder,
     };
     let svc = HivemindServer::new(state);
     info!(%args.listen, "hivemind gRPC service listening");
@@ -178,6 +182,9 @@ impl GrpcState {
         .with_env_overrides()
         .map_err(|e| Status::internal(e.to_string()))?;
         let store = Store::open(&dir, options).map_err(|e| Status::internal(e.to_string()))?;
+        self.embedder
+            .apply(&store)
+            .map_err(|e| Status::internal(e.to_string()))?;
         let service = Arc::new(Service::new(store));
         let mut guard = self
             .stores

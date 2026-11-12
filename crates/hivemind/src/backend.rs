@@ -6,6 +6,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::client::Client;
+use crate::embedder::EmbedderArgs;
 use hivemind_engine::{Durability, Options, Store};
 
 #[derive(Debug)]
@@ -17,6 +18,11 @@ pub enum Backend {
 impl Backend {
     /// Prefer a live daemon; fall back to opening the store directly.
     pub fn open(dir: &Path, no_fsync: bool) -> Result<Self> {
+        Self::open_with_embedder(dir, no_fsync, &EmbedderArgs::default())
+    }
+
+    /// Like [`Self::open`], then attach an optional embedder on the local path.
+    pub fn open_with_embedder(dir: &Path, no_fsync: bool, embedder: &EmbedderArgs) -> Result<Self> {
         if let Ok(client) = Client::connect(dir) {
             return Ok(Self::Daemon(client));
         }
@@ -29,7 +35,9 @@ impl Backend {
             ..Options::default()
         }
         .with_env_overrides()?;
-        Ok(Self::Local(Box::new(Store::open(dir, options)?)))
+        let store = Store::open(dir, options)?;
+        embedder.apply(&store)?;
+        Ok(Self::Local(Box::new(store)))
     }
 
     pub fn store(&self) -> Option<&Store> {

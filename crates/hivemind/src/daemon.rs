@@ -14,6 +14,7 @@ use clap::Parser;
 use hivemind_engine::{Durability, Options, Store};
 use tracing::{info, warn};
 
+use crate::embedder::EmbedderArgs;
 use crate::protocol::{self, RUN_DIR, Request, Response};
 use crate::service::Service;
 
@@ -32,6 +33,8 @@ pub struct DaemonArgs {
     /// Stay in the foreground (default). Background spawners redirect stdio.
     #[arg(long, default_value_t = true)]
     pub foreground: bool,
+    #[command(flatten)]
+    pub embedder: EmbedderArgs,
 }
 
 pub fn main_from_env() -> Result<()> {
@@ -58,6 +61,9 @@ pub fn run(args: DaemonArgs) -> Result<()> {
     .context("HIVEMIND_EVENT_CODEC")?;
     let store =
         Store::open(&dir, options).with_context(|| format!("open store {}", dir.display()))?;
+    args.embedder
+        .apply(&store)
+        .context("attach optional embedder")?;
     let service = Arc::new(Service::new(store));
     let run_dir = dir.join(RUN_DIR);
     fs::create_dir_all(&run_dir)?;

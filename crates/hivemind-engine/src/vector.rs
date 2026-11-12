@@ -3,9 +3,16 @@
 //! Every vector is tagged with an [`EmbeddingSpace`]. Search is exact-first:
 //! brute-force cosine over f32, or over int8 codes with optional f32 rescoring
 //! of the top candidates (`docs/04` D5). Real model inference plugs in behind
-//! [`Embedder`]; tests use [`HashEmbedder`].
+//! [`Embedder`]; tests use [`HashEmbedder`]. Production static models use
+//! [`Model2VecEmbedder`] behind the `embeddings` cargo feature.
+//!
+//! **Lean default:** no embedder is attached. Remember and recall are
+//! lexical-only (BM25) until an operator calls [`crate::Store::set_embedder`]
+//! or enables one via CLI/env (`docs/operations.md`).
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -448,6 +455,154 @@ fn hash_token(token: &str) -> u64 {
     hash
 }
 
+/// Production-oriented static embedder (Model2Vec / potion-family).
+///
+/// Enabled only with the `embeddings` cargo feature. Load weights from a local
+/// directory (or a Hub id when built with `embeddings-hf`). Fits the ≤300 MB
+/// idle-RSS budget for small static models (`docs/01`, `research/07`).
+#[cfg(feature = "embeddings")]
+#[derive(Clone, Debug)]
+pub struct Model2VecEmbedder {
+    space: EmbeddingSpace,
+    model: model2vec_rs::model::StaticModel,
+}
+
+#[cfg(feature = "embeddings")]
+impl Model2VecEmbedder {
+    /// Load from a local model directory, or (with `embeddings-hf`) a Hub repo id.
+    pub fn from_pretrained(
+        model: impl AsRef<std::path::Path>,
+        revision: Option<&str>,
+    ) -> Result<Self, String> {
+        let path = model.as_ref();
+        let label = path.display().to_string();
+        let loaded =
+            model2vec_rs::model::StaticModel::from_pretrained(path, None, Some(true), None)
+                .map_err(|e| format!("model2vec load ({label}): {e}"))?;
+        let dims = loaded.dim() as u32;
+        Ok(Self {
+            space: EmbeddingSpace {
+                model: label,
+                revision: revision.unwrap_or("model2vec").to_owned(),
+                dims,
+                quantization: Quantization::F32,
+            },
+            model: loaded,
+        })
+    }
+}
+
+#[cfg(feature = "embeddings")]
+impl Embedder for Model2VecEmbedder {
+    fn space(&self) -> &EmbeddingSpace {
+        &self.space
+    }
+
+    fn embed(&self, text: &str) -> Vec<f32> {
+        self.model.encode_single(text)
+    }
+}
+
+/// Operator selection for the optional embedder. Default is [`Self::None`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum EmbedderChoice {
+    /// Lexical-only lean default (no vectors indexed or searched).
+    #[default]
+    None,
+    /// Deterministic hash embedder for tests / dry-runs only.
+    Hash { dims: u32, int8: bool },
+    /// Static Model2Vec weights (requires the `embeddings` cargo feature).
+    Model2Vec {
+        model: PathBuf,
+        revision: Option<String>,
+    },
+}
+
+impl EmbedderChoice {
+    /// Parse `none` / `hash` / `model2vec` (case-insensitive).
+    pub fn parse_kind(kind: &str) -> Result<Self, String> {
+        match kind.trim().to_ascii_lowercase().as_str() {
+            "" | "none" | "off" | "lexical" => Ok(Self::None),
+            "hash" | "hash-embedder" => Ok(Self::Hash {
+                dims: 384,
+                int8: false,
+            }),
+            "model2vec" | "static" | "m2v" => Ok(Self::Model2Vec {
+                model: PathBuf::new(),
+                revision: None,
+            }),
+            other => Err(format!(
+                "unknown embedder '{other}' (expected none|hash|model2vec)"
+            )),
+        }
+    }
+
+    pub fn with_model(mut self, model: Option<PathBuf>) -> Self {
+        if let (Self::Model2Vec { model: slot, .. }, Some(path)) = (&mut self, model) {
+            *slot = path;
+        }
+        self
+    }
+
+    pub fn with_dims(mut self, dims: Option<u32>) -> Self {
+        if let (Self::Hash { dims: slot, .. }, Some(d)) = (&mut self, dims) {
+            *slot = d;
+        }
+        self
+    }
+
+    pub fn with_int8(mut self, int8: bool) -> Self {
+        if let Self::Hash { int8: slot, .. } = &mut self {
+            *slot = int8;
+        }
+        self
+    }
+
+    pub fn with_revision(mut self, revision: Option<String>) -> Self {
+        if let (Self::Model2Vec { revision: slot, .. }, Some(r)) = (&mut self, revision) {
+            *slot = Some(r);
+        }
+        self
+    }
+}
+
+/// Build an [`Embedder`] from an operator choice, or `None` for lexical-only.
+pub fn build_embedder(choice: &EmbedderChoice) -> Result<Option<Arc<dyn Embedder>>, String> {
+    match choice {
+        EmbedderChoice::None => Ok(None),
+        EmbedderChoice::Hash { dims, int8 } => {
+            let embedder: Arc<dyn Embedder> = if *int8 {
+                Arc::new(HashEmbedder::int8(*dims))
+            } else {
+                Arc::new(HashEmbedder::new(*dims))
+            };
+            Ok(Some(embedder))
+        }
+        EmbedderChoice::Model2Vec { model, revision } => {
+            #[cfg(feature = "embeddings")]
+            {
+                if model.as_os_str().is_empty() {
+                    return Err(
+                        "model2vec embedder requires --embedder-model / HIVEMIND_EMBEDDER_MODEL"
+                            .into(),
+                    );
+                }
+                let embedder = Model2VecEmbedder::from_pretrained(model, revision.as_deref())?;
+                Ok(Some(Arc::new(embedder) as Arc<dyn Embedder>))
+            }
+            #[cfg(not(feature = "embeddings"))]
+            {
+                let _ = (model, revision);
+                Err(
+                    "model2vec embedder requires building with `--features embeddings` \
+                     (see docs/operations.md)"
+                        .into(),
+                )
+            }
+        }
+    }
+}
+
 /// Reciprocal rank fusion of two ranked lists (`docs/04` retrieval pipeline).
 pub fn rrf_fuse(lexical: &[(u32, f32)], vectors: &[(u32, f32)], k: f32) -> Vec<(u32, f32)> {
     let mut scores: HashMap<u32, f32> = HashMap::new();
@@ -534,5 +689,52 @@ mod tests {
             overlap >= 7,
             "ANN top-10 should overlap exact top-10 (got {overlap}/10); exact={exact:?} ann={ann:?}"
         );
+    }
+
+    #[test]
+    fn build_embedder_none_is_lexical_default() {
+        let built = build_embedder(&EmbedderChoice::None).unwrap();
+        assert!(built.is_none());
+    }
+
+    #[test]
+    fn build_embedder_hash_returns_space() {
+        let built = build_embedder(&EmbedderChoice::Hash {
+            dims: 32,
+            int8: false,
+        })
+        .unwrap()
+        .expect("hash embedder");
+        assert_eq!(built.space().dims, 32);
+        assert_eq!(built.embed("hello").len(), 32);
+    }
+
+    #[test]
+    fn parse_kind_defaults_and_rejects_unknown() {
+        assert_eq!(
+            EmbedderChoice::parse_kind("none").unwrap(),
+            EmbedderChoice::None
+        );
+        assert_eq!(
+            EmbedderChoice::parse_kind("lexical").unwrap(),
+            EmbedderChoice::None
+        );
+        assert!(EmbedderChoice::parse_kind("onnx").is_err());
+    }
+
+    #[test]
+    fn model2vec_without_feature_or_path_errors_clearly() {
+        let choice = EmbedderChoice::Model2Vec {
+            model: PathBuf::new(),
+            revision: None,
+        };
+        let err = match build_embedder(&choice) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        #[cfg(feature = "embeddings")]
+        assert!(err.contains("HIVEMIND_EMBEDDER_MODEL") || err.contains("embedder-model"));
+        #[cfg(not(feature = "embeddings"))]
+        assert!(err.contains("--features embeddings"));
     }
 }

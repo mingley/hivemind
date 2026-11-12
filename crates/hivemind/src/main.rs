@@ -52,6 +52,8 @@ struct Cli {
     /// this process but not power loss.
     #[arg(long, hide = true, global = true)]
     no_fsync: bool,
+    #[command(flatten)]
+    embedder: hivemind::embedder::EmbedderArgs,
     #[command(subcommand)]
     command: Command,
 }
@@ -196,6 +198,8 @@ struct ServeArgs {
     /// Skip fsync (tests only).
     #[arg(long, hide = true)]
     no_fsync: bool,
+    #[command(flatten)]
+    embedder: hivemind::embedder::EmbedderArgs,
 }
 
 #[derive(Args, Debug)]
@@ -581,6 +585,7 @@ fn run(cli: Cli) -> Result<()> {
                 rpc_rate_per_minute: args.rpc_rate_per_minute,
                 oauth_clients_path: args.oauth_clients_path.clone(),
                 oauth_refresh_path: args.oauth_refresh_path.clone(),
+                embedder: args.embedder.clone(),
             }));
         }
         Command::Backup(args) => {
@@ -621,8 +626,9 @@ fn run(cli: Cli) -> Result<()> {
         _ => {}
     }
 
-    let mut backend = hivemind::backend::Backend::open(&dir, cli.no_fsync)
-        .with_context(|| format!("opening store at {}", dir.display()))?;
+    let mut backend =
+        hivemind::backend::Backend::open_with_embedder(&dir, cli.no_fsync, &cli.embedder)
+            .with_context(|| format!("opening store at {}", dir.display()))?;
     if let Some(store) = backend.store() {
         let recovery = store.recovery();
         if recovery.truncated_bytes > 0 {

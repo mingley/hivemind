@@ -39,6 +39,7 @@ async fn grpc_hello_and_rpc_with_bearer() {
         oauth,
         limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
         no_fsync: true,
+        embedder: hivemind::embedder::EmbedderArgs::default(),
     }));
 
     for _ in 0..50 {
@@ -117,6 +118,7 @@ async fn grpc_rpc_rate_limit_resource_exhausted() {
             rpc_per_minute: 2,
         })),
         no_fsync: true,
+        embedder: hivemind::embedder::EmbedderArgs::default(),
     }));
 
     for _ in 0..50 {

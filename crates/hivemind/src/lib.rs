@@ -8,6 +8,7 @@
 pub mod backend;
 pub mod client;
 pub mod daemon;
+pub mod embedder;
 pub mod exchange;
 pub mod grpc;
 pub mod http;

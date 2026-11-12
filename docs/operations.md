@@ -37,6 +37,10 @@ Daemon, `hivemind serve`, and gRPC all call the same tracing init.
 | `HIVEMIND_AGENT` | Agent name on writes | unset |
 | `HIVEMIND_SESSION` | Session id on writes | unset |
 | `HIVEMIND_WORKSPACE` | Workspace root for citation checks (CLI) | cwd |
+| `HIVEMIND_EMBEDDER` | Optional embedder: `none` / `hash` / `model2vec` | `none` (lexical-only) |
+| `HIVEMIND_EMBEDDER_MODEL` | Model dir (or Hub id with `embeddings-hf`) for `model2vec` | unset |
+| `HIVEMIND_EMBEDDER_DIMS` | Dims for `hash` embedder | `384` |
+| `HIVEMIND_EMBEDDER_REVISION` | Optional embedding-space revision label | unset |
 
 ### Event codec
 
@@ -89,7 +93,7 @@ Flags: `--listen` (default `127.0.0.1:8787`), `--no-grpc`, `--token`,
 `--oauth-client-secret`, `--signing-key`, `--oauth-clients-path`,
 `--oauth-refresh-path`, `--access-token-ttl-secs`, `--refresh-token-ttl-secs`,
 `--token-rate-per-minute`, `--register-rate-per-minute`,
-`--rpc-rate-per-minute`, `--require-tls`, `--root`.
+`--rpc-rate-per-minute`, `--require-tls`, `--root`, plus the embedder flags below.
 
 **Rate limits:** in-process token buckets. Excess `/oauth/token`,
 `/oauth/register`, or authenticated RPC returns HTTP `429` with `Retry-After`
@@ -240,6 +244,42 @@ The image entrypoint is `hivemind serve --listen 0.0.0.0:8787 --root /var/lib/hi
 Pass distinct bootstrap / client-secret / signing-key env vars. Override with
 e.g. `docker run … hivemind:local daemon` for a single-store daemon (publish no
 HTTP ports in that case; use a volume for `HIVEMIND_DIR`).
+
+## Embeddings (optional; lean default is lexical-only)
+
+**Default:** no embedder. `remember` / `recall` use code-aware BM25 only.
+Vectors are not required, not downloaded, and not indexed. This matches the
+F4 lean-default decision in [07](07-falsification-experiments.md) (hybrid has
+not shown a ≥10% online win in-repo, so embeddings stay optional).
+
+| Mode | How to enable | Notes |
+|---|---|---|
+| Lexical-only (default) | unset / `--embedder none` | Idle RSS target without a model: ≤50 MB ([01](01-problem-and-goals.md)) |
+| `hash` | `--embedder hash` | Deterministic bag-of-hashes for tests / dry-runs only — **not** for production quality |
+| `model2vec` | build with `--features embeddings`, then `--embedder model2vec --embedder-model <dir>` | Static local Model2Vec (e.g. `minishlab/potion-base-8M`); small-model idle RSS budget ≤300 MB ([01](01-problem-and-goals.md), [research/07](../research/07-embeddings-and-local-inference.md)) |
+
+### Install a static model (Model2Vec)
+
+```bash
+# Build CLI/daemon with the optional embedder (needs a working C++ toolchain
+# for `tokenizers` / `onig`; on some hosts: CXX=g++-13 and a libstdc++.so
+# visible to the linker).
+cargo build --release -p hivemind --features embeddings
+
+# Download a small static model (example: potion-base-8M) into a local directory,
+# then point hivemind at it. With `--features embeddings-hf` you may pass a Hub
+# repo id instead of a path.
+hivemindd --embedder model2vec --embedder-model /var/lib/hivemind/models/potion-base-8M
+# or:
+HIVEMIND_EMBEDDER=model2vec \
+HIVEMIND_EMBEDDER_MODEL=/var/lib/hivemind/models/potion-base-8M \
+  hivemind serve --listen 127.0.0.1:8787 ...
+```
+
+Library path: implement [`Embedder`](../crates/hivemind-engine/src/vector.rs) and
+call `Store::set_embedder`, or use `build_embedder` / `EmbedderChoice`. Default
+builds leave the `embeddings` feature **off**; CI and lean installs stay
+lexical-only.
 
 ## Erasure / forget (privacy SLA)
 

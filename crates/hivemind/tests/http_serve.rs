@@ -28,6 +28,7 @@ fn test_args(root: std::path::PathBuf, addr: SocketAddr) -> ServeArgs {
         rpc_rate_per_minute: hivemind::ratelimit::DEFAULT_RPC_RATE_PER_MINUTE,
         oauth_clients_path: None,
         oauth_refresh_path: None,
+        embedder: hivemind::embedder::EmbedderArgs::default(),
     }
 }
 

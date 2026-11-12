@@ -38,6 +38,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::info;
 
+use crate::embedder::EmbedderArgs;
 use crate::mcp::HiveMcp;
 use crate::oauth::{
     self, AuthIdentity, ClientRegistrationRequest, DEFAULT_ACCESS_TOKEN_TTL_SECS, OAuthConfig,
@@ -83,6 +84,8 @@ pub struct ServeArgs {
     pub oauth_clients_path: Option<PathBuf>,
     /// Durable refresh-token store JSON. Default: `{root}/oauth/refresh_tokens.json`.
     pub oauth_refresh_path: Option<PathBuf>,
+    /// Optional embedder (default none = lexical-only).
+    pub embedder: EmbedderArgs,
 }
 
 struct AppState {
@@ -93,6 +96,7 @@ struct AppState {
     default_tenant: String,
     stores: Mutex<HashMap<String, Arc<Service>>>,
     limiter: Arc<RateLimiter>,
+    embedder: EmbedderArgs,
 }
 
 pub async fn serve(args: ServeArgs) -> Result<()> {
@@ -148,6 +152,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         default_tenant: args.default_tenant.clone(),
         stores: Mutex::new(HashMap::new()),
         limiter: limiter.clone(),
+        embedder: args.embedder.clone(),
     });
 
     // Ensure default tenant store exists before mounting MCP.
@@ -230,6 +235,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
             oauth: oauth.clone(),
             limiter: limiter.clone(),
             no_fsync: args.no_fsync,
+            embedder: args.embedder.clone(),
         };
         tokio::spawn(async move {
             if let Err(e) = crate::grpc::serve(grpc_args).await {
@@ -633,6 +639,9 @@ impl AppState {
         .with_env_overrides()
         .map_err(|e| ApiError::from(anyhow!(e)))?;
         let store = Store::open(&dir, options).map_err(|e| ApiError::from(anyhow!(e)))?;
+        self.embedder
+            .apply(&store)
+            .map_err(|e| ApiError::from(anyhow!(e)))?;
         let service = Arc::new(Service::new(store));
         let mut guard = self
             .stores

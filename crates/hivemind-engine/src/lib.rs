@@ -41,6 +41,9 @@ pub use store::{
     BackupReport, ChangesFilter, LeaseReceipt, LeaseView, Manifest, Options, Receipt, Remember,
     Stats, Store, VerifyReport,
 };
+#[cfg(feature = "embeddings")]
+pub use vector::Model2VecEmbedder;
 pub use vector::{
-    Embedder, EmbeddingSpace, HashEmbedder, Quantization, VectorAnn, VectorIndex, rrf_fuse,
+    Embedder, EmbedderChoice, EmbeddingSpace, HashEmbedder, Quantization, VectorAnn, VectorIndex,
+    build_embedder, rrf_fuse,
 };

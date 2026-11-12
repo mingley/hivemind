@@ -1,9 +1,12 @@
 //! M4: embedding spaces, quantized scan, RRF fusion, hippocampal boosts.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use hivemind_core::{Actor, ClaimData, ClaimKind};
-use hivemind_engine::{Durability, HashEmbedder, Options, Query, Remember, Store};
+use hivemind_engine::{
+    Durability, EmbedderChoice, HashEmbedder, Options, Query, Remember, Store, build_embedder,
+};
 use tempfile::tempdir;
 
 fn options() -> Options {
@@ -11,6 +14,53 @@ fn options() -> Options {
         durability: Durability::NoFsync,
         ..Options::default()
     }
+}
+
+#[test]
+fn lexical_default_remember_recall_without_embedder() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path(), options()).unwrap();
+    assert!(store.embedding_space().is_none());
+    assert_eq!(store.vector_count(), 0);
+
+    let actor = Actor::agent("tester");
+    let data = ClaimData::new(
+        ClaimKind::Solution,
+        "OpenSSL linker miss on macOS arm64 needs OPENSSL_DIR",
+        "project:acme/api".parse().unwrap(),
+    );
+    store.remember(&actor, Remember::new(data)).unwrap();
+    assert_eq!(store.vector_count(), 0);
+
+    let hits = store.recall(&Query {
+        text: "OPENSSL_DIR macos linker".into(),
+        limit: Some(3),
+        ..Query::default()
+    });
+    assert_eq!(hits.cards.len(), 1);
+    assert!(hits.cards[0].statement.contains("OPENSSL_DIR"));
+}
+
+#[test]
+fn build_embedder_none_keeps_feature_off_default() {
+    assert!(build_embedder(&EmbedderChoice::None).unwrap().is_none());
+    let err = match build_embedder(&EmbedderChoice::Model2Vec {
+        model: PathBuf::from("/nonexistent-model2vec"),
+        revision: None,
+    }) {
+        Ok(_) => panic!("expected error"),
+        Err(e) => e,
+    };
+    #[cfg(feature = "embeddings")]
+    assert!(
+        err.contains("model2vec") || err.contains("nonexistent"),
+        "unexpected err: {err}"
+    );
+    #[cfg(not(feature = "embeddings"))]
+    assert!(
+        err.contains("--features embeddings"),
+        "unexpected err: {err}"
+    );
 }
 
 #[test]
