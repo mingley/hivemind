@@ -1,0 +1,57 @@
+name: release
+
+# Linux release binaries. PR CI stays on ci.yml only; this runs on main
+# pushes, version tags, and manual dispatch. See docs/operations.md.
+# protoc is required for the gRPC build of crates/hivemind.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: build linux binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          protoc --version
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-release-${{ hashFiles('Cargo.lock') }}
+      - name: Build release binaries
+        run: cargo build --release --locked -p hivemind
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/hivemind target/release/hivemindd dist/
+          (cd dist && sha256sum hivemind hivemindd > SHA256SUMS)
+          tar -C dist -czf hivemind-linux-x86_64.tar.gz hivemind hivemindd SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hivemind-linux-x86_64
+          path: |
+            dist/hivemind
+            dist/hivemindd
+            dist/SHA256SUMS
+            hivemind-linux-x86_64.tar.gz
+          if-no-files-found: error

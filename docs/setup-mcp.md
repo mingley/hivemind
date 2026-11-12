@@ -1,9 +1,14 @@
 # MCP setup: Claude Code, Codex CLI, Copilot CLI
 
-Status: M1 (2026-11-11). Local stdio only. Not production-ready: no
-authentication beyond the local Unix socket, no remote transport, and the
-token-type caps landed; keydir/full interning still open (see
-[06](06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11)).
+Status: M1 (2026-11-11). Local stdio only. Not a full production deployment
+path: no authentication beyond the local Unix socket; for shared-service
+ops (health, metrics, serve, container) see [operations.md](operations.md).
+
+Aligned with [06 M1 status](06-prototype-plan.md#m1-status-daemon-and-mcp-done-2026-11-11):
+compact claim rows (keydir), scope/principal/entity interning, and the
+lexical token-type cap are **landed** in the engine. What remains open is
+re-measuring RSS vs the ≤ 50 MB target (M0 cited 230 MB pre-mitigation) and
+whether each agent sandbox allows a Unix socket or a spawned daemon.
 
 hivemind exposes memory to coding agents as an MCP server. The agent talks
 stdio MCP to `hivemind mcp`; that shim finds or starts `hivemindd`, which owns

@@ -10,14 +10,17 @@ and tokens**, with enough provenance that agents can verify what they
 retrieve. It runs as a lean local daemon on a laptop and is designed to grow
 into a shared service.
 
-> **Status (2026-11-11):** research done; M0–M6 are built and tested (engine,
+> **Status (2026-11-12):** research done; M0–M6 are built and tested (engine,
 > daemon/MCP, `hivebench`, citations/leases/import-export, hybrid retrieval,
 > shared HTTP + MCP Streamable HTTP + OAuth 2.1 + gRPC, tenant partitions,
 > sync queue/cursor, segment backup, projection snapshots, mmap lexical
-> segments, LSH ANN, deterministic sim). Local agents still use
-> `hivemind mcp` → `hivemindd`; remote/team use `hivemind serve`. This is
-> **not** production-ready: no HA, post-mitigation RSS not yet re-measured
-> against the 50 MB target, and sandbox compatibility is unproven. Setup:
+> segments, LSH ANN, deterministic sim). **Ops surfaces landed:** CI installs
+> `protoc` then fmt/clippy/tests, Linux release artifacts, `/health` plus
+> additive `/readyz` `/metrics`, JSON logging via env, and a minimal
+> Dockerfile — see [docs/operations.md](docs/operations.md). Local agents
+> still use `hivemind mcp` → `hivemindd`; remote/team use `hivemind serve`.
+> The product is **not** fully production-ready yet (no HA, RSS vs 50 MB
+> target not re-claimed, sandbox compatibility unproven). Local MCP setup:
 > [docs/setup-mcp.md](docs/setup-mcp.md).
 
 ## What makes it different
@@ -53,6 +56,7 @@ into a shared service.
 | 07 | [Falsification experiments](docs/07-falsification-experiments.md) | Prioritized experiments that could overturn design bets early |
 | 08 | [Hippocampal design](docs/08-hippocampal-design.md) | Which ideas from hippocampal research become mechanisms, and how each is tested |
 | — | [MCP setup](docs/setup-mcp.md) | Build `hivemind` / `hivemindd`, configure Claude Code, Codex CLI, and Copilot CLI |
+| — | [Operations](docs/operations.md) | Run, backup, sync, health/metrics, auth env, release binaries, container |
 | — | [hivebench scenarios](scenarios/README.md) | M2 seed scenarios for offline retrieval and harness dry-runs |
 
 The [`research/`](research/) directory holds the sourced research reports these
@@ -107,7 +111,7 @@ that checks every acknowledged write survives.
 ## Layout
 
 ```text
-docs/        design documents (start with 01, then 04); setup-mcp.md for agents
+docs/        design documents (start with 01, then 04); setup-mcp.md; operations.md
 research/    sourced research reports, one per thread
 scenarios/   M2 seed scenarios for hivebench
 crates/

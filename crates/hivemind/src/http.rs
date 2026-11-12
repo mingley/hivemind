@@ -1,7 +1,10 @@
 //! Shared-service HTTP API (M5): tenants, OAuth 2.1, MCP Streamable HTTP, backup.
 //!
 //! Endpoints:
-//! - `/health` — open
+//! - `/health` — liveness (process up; existing probe, kept stable)
+//! - `/readyz` — readiness (default tenant store open; additive)
+//! - `/metrics` — Prometheus text exposition (additive)
+//! - `/healthz` — optional alias of `/health` (not a required rename)
 //! - `/.well-known/oauth-*` and `/oauth/*` — OAuth 2.1 AS + protected resource
 //! - `/mcp` — MCP Streamable HTTP for `--default-tenant`
 //! - `/v1/tenants…` — JSON API (bearer: OAuth access token or bootstrap token)
@@ -10,11 +13,13 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow};
 use axum::Router;
 use axum::extract::{Form, Path as AxumPath, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, middleware};
@@ -27,6 +32,7 @@ use tracing::info;
 
 use crate::mcp::HiveMcp;
 use crate::oauth::{self, OAuthConfig, OAuthState, TokenForm};
+use crate::obs;
 use crate::service::Service;
 use crate::sync;
 use crate::tenant::{self, ensure_tenant_dir, list_tenants};
@@ -52,10 +58,13 @@ struct AppState {
     token: String,
     durability: Durability,
     oauth: OAuthState,
+    default_tenant: String,
     stores: Mutex<HashMap<String, Arc<Service>>>,
 }
 
 pub async fn serve(args: ServeArgs) -> Result<()> {
+    obs::init_tracing();
+    obs::ensure_registered();
     if args.token.trim().is_empty() {
         return Err(anyhow!("HIVEMIND_TOKEN / --token must be non-empty"));
     }
@@ -83,6 +92,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
             Durability::Fsync
         },
         oauth: oauth.clone(),
+        default_tenant: args.default_tenant.clone(),
         stores: Mutex::new(HashMap::new()),
     });
 
@@ -96,16 +106,15 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
             move || Ok(HiveMcp::from_service(default_service.clone()))
         },
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default()
-            .with_allowed_hosts([
-                "localhost".to_owned(),
-                "127.0.0.1".to_owned(),
-                "::1".to_owned(),
-                args.listen.ip().to_string(),
-                format!("{}:{}", args.listen.ip(), args.listen.port()),
-                format!("localhost:{}", args.listen.port()),
-                format!("127.0.0.1:{}", args.listen.port()),
-            ]),
+        StreamableHttpServerConfig::default().with_allowed_hosts([
+            "localhost".to_owned(),
+            "127.0.0.1".to_owned(),
+            "::1".to_owned(),
+            args.listen.ip().to_string(),
+            format!("{}:{}", args.listen.ip(), args.listen.port()),
+            format!("localhost:{}", args.listen.port()),
+            format!("127.0.0.1:{}", args.listen.port()),
+        ]),
     );
 
     let protected = Router::new()
@@ -122,6 +131,9 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics))
+        .route("/healthz", get(health))
         .route(
             "/.well-known/oauth-authorization-server",
             get(oauth_as_metadata),
@@ -137,6 +149,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         .route("/oauth/authorize", get(oauth_authorize))
         .route("/oauth/token", post(oauth_token))
         .merge(protected)
+        .layer(middleware::from_fn(http_metrics))
         .with_state(state.clone());
 
     if let Some(grpc_listen) = args.grpc_listen {
@@ -169,6 +182,15 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     Ok(())
 }
 
+async fn http_metrics(request: axum::extract::Request, next: Next) -> Response {
+    let method = request.method().to_string();
+    let path = obs::normalize_path(request.uri().path());
+    let started = Instant::now();
+    let response = next.run(request).await;
+    obs::record_http(&method, &path, response.status().as_u16(), started);
+    response
+}
+
 async fn require_bearer(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -192,9 +214,7 @@ fn unauthorized(state: &AppState, message: String) -> Response {
         "{}/.well-known/oauth-protected-resource",
         state.oauth.config.issuer
     );
-    let www = format!(
-        "Bearer realm=\"hivemind\", resource_metadata=\"{resource_meta}\""
-    );
+    let www = format!("Bearer realm=\"hivemind\", resource_metadata=\"{resource_meta}\"");
     (
         StatusCode::UNAUTHORIZED,
         [(axum::http::header::WWW_AUTHENTICATE, www)],
@@ -203,8 +223,54 @@ fn unauthorized(state: &AppState, message: String) -> Response {
         .into_response()
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({ "ok": true, "service": "hivemind" }))
+async fn health() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "service": "hivemind", "probe": "liveness" })),
+    )
+}
+
+async fn readyz(State(state): State<Arc<AppState>>) -> Response {
+    match state.service_for(&state.default_tenant) {
+        Ok(service) => {
+            let offset = service.store().next_offset();
+            obs::set_log_offset(&state.default_tenant, offset);
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "service": "hivemind",
+                    "probe": "readiness",
+                    "tenant": state.default_tenant,
+                    "next_offset": offset,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "ok": false,
+                "service": "hivemind",
+                "probe": "readiness",
+                "error": e.message,
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    state.refresh_log_offsets();
+    let body = obs::render_prometheus();
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+        )],
+        body,
+    )
 }
 
 async fn oauth_as_metadata(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -240,14 +306,10 @@ async fn oauth_authorize(
     let client_id = q.client_id.unwrap_or_default();
     let redirect_uri = q.redirect_uri.unwrap_or_default();
     let challenge = q.code_challenge.unwrap_or_default();
-    let method = q
-        .code_challenge_method
-        .unwrap_or_else(|| "S256".to_owned());
+    let method = q.code_challenge_method.unwrap_or_else(|| "S256".to_owned());
     if redirect_uri.is_empty() {
-        return Html(
-            "<!doctype html><title>hivemind oauth</title><p>redirect_uri required</p>",
-        )
-        .into_response();
+        return Html("<!doctype html><title>hivemind oauth</title><p>redirect_uri required</p>")
+            .into_response();
     }
     match state.oauth.mint_authorize_code(
         &client_id,
@@ -326,6 +388,7 @@ async fn tenant_rpc(
     let value = service
         .dispatch(&body.method, body.params)
         .map_err(ApiError::from)?;
+    obs::set_log_offset(&tenant, service.store().next_offset());
     Ok(Json(value))
 }
 
@@ -382,6 +445,7 @@ impl AppState {
                 .lock()
                 .map_err(|_| ApiError::from(anyhow!("lock poisoned")))?;
             if let Some(svc) = guard.get(tenant) {
+                obs::set_log_offset(tenant, svc.store().next_offset());
                 return Ok(svc.clone());
             }
         }
@@ -399,7 +463,18 @@ impl AppState {
             .stores
             .lock()
             .map_err(|_| ApiError::from(anyhow!("lock poisoned")))?;
-        Ok(guard.entry(tenant.to_owned()).or_insert(service).clone())
+        let service = guard.entry(tenant.to_owned()).or_insert(service).clone();
+        obs::set_log_offset(tenant, service.store().next_offset());
+        Ok(service)
+    }
+
+    fn refresh_log_offsets(&self) {
+        let Ok(guard) = self.stores.lock() else {
+            return;
+        };
+        for (tenant, service) in guard.iter() {
+            obs::set_log_offset(tenant, service.store().next_offset());
+        }
     }
 }
 

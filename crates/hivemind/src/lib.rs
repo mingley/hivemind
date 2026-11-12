@@ -13,6 +13,7 @@ pub mod grpc;
 pub mod http;
 pub mod mcp;
 pub mod oauth;
+pub mod obs;
 pub mod protocol;
 pub mod service;
 pub mod sync;

@@ -53,6 +53,7 @@ pub struct GrpcArgs {
 }
 
 pub async fn serve(args: GrpcArgs) -> Result<()> {
+    crate::obs::init_tracing();
     let state = GrpcState {
         root: args.root.clone(),
         token: args.token,

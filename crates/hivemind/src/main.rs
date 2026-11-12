@@ -467,6 +467,7 @@ fn run(cli: Cli) -> Result<()> {
             return hivemind::daemon::run(args);
         }
         Command::Serve(args) => {
+            hivemind::obs::init_tracing();
             let root = match &args.root {
                 Some(r) => r.clone(),
                 None => default_root()?,

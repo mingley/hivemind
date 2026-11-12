@@ -29,24 +29,68 @@ async fn health_oauth_metadata_and_rpc() {
     wait_for(addr).await;
 
     let client = reqwest::Client::new();
+    // Keep existing /health as the primary liveness probe.
     let health = client
         .get(format!("http://{addr}/health"))
         .send()
         .await
         .unwrap();
     assert_eq!(health.status(), 200);
+    let health_body: serde_json::Value = health.json().await.unwrap();
+    assert_eq!(health_body["ok"], true);
+    assert_eq!(health_body["service"], "hivemind");
+
+    // Additive readiness + metrics (P0-A); /healthz is an optional alias only.
+    let readyz = client
+        .get(format!("http://{addr}/readyz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(readyz.status(), 200);
+    let readyz_body: serde_json::Value = readyz.json().await.unwrap();
+    assert_eq!(readyz_body["probe"], "readiness");
+    assert_eq!(readyz_body["tenant"], "default");
+
+    let healthz_alias = client
+        .get(format!("http://{addr}/healthz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(healthz_alias.status(), 200);
+
+    let metrics = client
+        .get(format!("http://{addr}/metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(metrics.status(), 200);
+    let metrics_body = metrics.text().await.unwrap();
+    assert!(
+        metrics_body.contains("hivemind_http_requests_total"),
+        "metrics body missing http counter: {metrics_body}"
+    );
+    assert!(metrics_body.contains("hivemind_log_offset"));
 
     let as_meta = client
-        .get(format!("http://{addr}/.well-known/oauth-authorization-server"))
+        .get(format!(
+            "http://{addr}/.well-known/oauth-authorization-server"
+        ))
         .send()
         .await
         .unwrap();
     assert_eq!(as_meta.status(), 200);
     let as_body: serde_json::Value = as_meta.json().await.unwrap();
-    assert!(as_body["token_endpoint"].as_str().unwrap().contains("/oauth/token"));
+    assert!(
+        as_body["token_endpoint"]
+            .as_str()
+            .unwrap()
+            .contains("/oauth/token")
+    );
 
     let pr_meta = client
-        .get(format!("http://{addr}/.well-known/oauth-protected-resource"))
+        .get(format!(
+            "http://{addr}/.well-known/oauth-protected-resource"
+        ))
         .send()
         .await
         .unwrap();
@@ -87,7 +131,12 @@ async fn health_oauth_metadata_and_rpc() {
         .send()
         .await
         .unwrap();
-    assert_eq!(token_resp.status(), 200, "{}", token_resp.text().await.unwrap());
+    assert_eq!(
+        token_resp.status(),
+        200,
+        "{}",
+        token_resp.text().await.unwrap()
+    );
     let token_body: serde_json::Value = token_resp.json().await.unwrap();
     let access = token_body["access_token"].as_str().unwrap();
 
@@ -107,6 +156,19 @@ async fn health_oauth_metadata_and_rpc() {
         .await
         .unwrap();
     assert_eq!(remember.status(), 200, "{}", remember.text().await.unwrap());
+
+    let metrics_after = client
+        .get(format!("http://{addr}/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        metrics_after.contains("hivemind_remember_total"),
+        "expected remember counter after rpc: {metrics_after}"
+    );
 
     let changes = client
         .get(format!("http://{addr}/v1/tenants/acme/changes?from=0"))

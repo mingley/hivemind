@@ -40,7 +40,7 @@ pub fn main_from_env() -> Result<()> {
 }
 
 pub fn run(args: DaemonArgs) -> Result<()> {
-    init_tracing();
+    crate::obs::init_tracing();
     let dir = match args.dir {
         Some(d) => d,
         None => default_dir()?,
@@ -195,16 +195,6 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .try_init();
 }
 
 struct SocketGuard(PathBuf);

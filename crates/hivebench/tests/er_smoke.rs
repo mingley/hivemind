@@ -21,7 +21,7 @@ fn scenario_01_hivemind_hits_gold() {
         eprintln!(
             "  id={} stmt={}",
             c.id,
-            &c.statement.chars().take(60).collect::<String>()
+            c.statement.chars().take(60).collect::<String>()
         );
     }
     let claim_to_gold: std::collections::BTreeMap<_, _> =

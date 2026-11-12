@@ -131,6 +131,7 @@ impl Service {
         }
         req.idempotency_key = p.idempotency_key;
         let receipt = self.store.remember(&actor, req)?;
+        crate::obs::record_remember();
         Ok(serde_json::to_value(receipt)?)
     }
 
@@ -150,7 +151,9 @@ impl Service {
             entity_boost: true,
             ..Query::default()
         };
-        Ok(serde_json::to_value(self.store.recall(&query))?)
+        let recall = self.store.recall(&query);
+        crate::obs::record_recall();
+        Ok(serde_json::to_value(recall)?)
     }
 
     fn show(&self, params: Value) -> Result<Value> {

@@ -1,5 +1,9 @@
 name: ci
 
+# PR/main gates: workspace fmt, clippy -D warnings, tests.
+# Release packaging lives in release.yml (main/tags) so PRs stay fast.
+# protoc is required to build the gRPC stubs in crates/hivemind.
+
 on:
   push:
     branches: [main]
@@ -21,6 +25,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - name: Install protoc
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install protobuf
+          else
+            sudo apt-get update
+            sudo apt-get install -y protobuf-compiler
+          fi
+          protoc --version
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
@@ -32,6 +45,9 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-      - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --all --locked
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test --workspace --locked
