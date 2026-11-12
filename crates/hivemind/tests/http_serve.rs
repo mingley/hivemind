@@ -27,6 +27,7 @@ fn test_args(root: std::path::PathBuf, addr: SocketAddr) -> ServeArgs {
         register_rate_per_minute: hivemind::ratelimit::DEFAULT_REGISTER_RATE_PER_MINUTE,
         rpc_rate_per_minute: hivemind::ratelimit::DEFAULT_RPC_RATE_PER_MINUTE,
         oauth_clients_path: None,
+        oauth_refresh_path: None,
     }
 }
 
@@ -889,6 +890,143 @@ async fn dcr_persists_across_server_restart() {
     // Configured static confidential client still works on the restarted process.
     let configured = oauth_access(&client, addr2, "client-secret").await;
     assert!(!configured.is_empty());
+
+    serve2.abort();
+}
+
+/// P1: refresh tokens survive process restart via `{root}/oauth/refresh_tokens.json`.
+#[tokio::test]
+async fn refresh_persists_across_server_restart() {
+    let root = tempdir().unwrap();
+    let refresh_path = root.path().join("oauth/refresh_tokens.json");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr1 = listener.local_addr().unwrap();
+    drop(listener);
+
+    let args1 = test_args(root.path().to_path_buf(), addr1);
+    let serve1 = tokio::spawn(http::serve(args1));
+    wait_for(addr1).await;
+    let client = reqwest::Client::new();
+
+    let redirect = "http://127.0.0.1/cb";
+    let verifier = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+    let challenge = "fR4ifSAEy-7Mu6g7FHZulPKrtjqdAnUCwRFAJt2JFsA";
+    let no_redirect = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let authorize = no_redirect
+        .get(format!("http://{addr1}/oauth/authorize"))
+        .query(&[
+            ("response_type", "code"),
+            ("client_id", "hivemind-cli"),
+            ("redirect_uri", redirect),
+            ("code_challenge", challenge),
+            ("code_challenge_method", "S256"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        authorize.status().is_redirection(),
+        "{}",
+        authorize.status()
+    );
+    let location = authorize
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let code = location
+        .split("code=")
+        .nth(1)
+        .and_then(|s| s.split('&').next())
+        .expect("authorize redirect must include code");
+
+    let token_resp = client
+        .post(format!("http://{addr1}/oauth/token"))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", "hivemind-cli"),
+            ("client_secret", "client-secret"),
+            ("code", code),
+            ("redirect_uri", redirect),
+            ("code_verifier", verifier),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        token_resp.status(),
+        200,
+        "{}",
+        token_resp.text().await.unwrap()
+    );
+    let first = token_resp.json::<serde_json::Value>().await.unwrap();
+    let refresh = first["refresh_token"].as_str().unwrap().to_owned();
+    assert!(
+        refresh_path.is_file(),
+        "expected refresh store at {}",
+        refresh_path.display()
+    );
+
+    serve1.abort();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener.local_addr().unwrap();
+    drop(listener);
+    let args2 = test_args(root.path().to_path_buf(), addr2);
+    let serve2 = tokio::spawn(http::serve(args2));
+    wait_for(addr2).await;
+
+    let refreshed = client
+        .post(format!("http://{addr2}/oauth/token"))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", "hivemind-cli"),
+            ("client_secret", "client-secret"),
+            ("refresh_token", refresh.as_str()),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        refreshed.status(),
+        200,
+        "persisted refresh handle should work after restart: {}",
+        refreshed.text().await.unwrap()
+    );
+    let body = refreshed.json::<serde_json::Value>().await.unwrap();
+    let new_refresh = body["refresh_token"].as_str().unwrap().to_owned();
+    assert_ne!(new_refresh, refresh);
+    let access = body["access_token"].as_str().unwrap();
+    let hello = client
+        .get(format!("http://{addr2}/v1/tenants/default/hello"))
+        .header("Authorization", format!("Bearer {access}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hello.status(), 200, "{}", hello.text().await.unwrap());
+
+    // Rotation still invalidates the pre-restart handle.
+    let replay = client
+        .post(format!("http://{addr2}/oauth/token"))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", "hivemind-cli"),
+            ("client_secret", "client-secret"),
+            ("refresh_token", refresh.as_str()),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        replay.status(),
+        200,
+        "rotated-away refresh handle must stay invalid"
+    );
 
     serve2.abort();
 }

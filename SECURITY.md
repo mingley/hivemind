@@ -47,9 +47,13 @@ reuse the bootstrap token as the client secret or signing key.
   (default 300s, `HIVEMIND_ACCESS_TOKEN_TTL_SECS`).
 - **Refresh tokens:** opaque server-side handles issued on `authorization_code`
   (and rotated on `refresh_token`). Default TTL 7 days
-  (`HIVEMIND_REFRESH_TOKEN_TTL_SECS`). Confidential clients must present their
-  secret; public DCR clients (`none`) refresh with `client_id` only.
-  `client_credentials` stays access-only (re-auth with the secret).
+  (`HIVEMIND_REFRESH_TOKEN_TTL_SECS`). Handles are persisted under
+  `{HIVEMIND_ROOT}/oauth/refresh_tokens.json` (override with
+  `HIVEMIND_OAUTH_REFRESH_PATH` / `--oauth-refresh-path`); rewritten atomically
+  on issue/rotate so interactive clients survive process restart. Confidential
+  clients must present their secret; public DCR clients (`none`) refresh with
+  `client_id` only. `client_credentials` stays access-only (re-auth with the
+  secret).
 - **Rate limits:** in-process token buckets on `/oauth/token` (per IP+`client_id`,
   default 60/min via `HIVEMIND_TOKEN_RATE_PER_MINUTE`), `/oauth/register` (per
   IP, default 10/min via `HIVEMIND_REGISTER_RATE_PER_MINUTE`), and authenticated
@@ -87,10 +91,11 @@ unless you add an external policy layer.
 | Stolen signing key | Attacker can forge access tokens; rotate and invalidate by changing the key (existing tokens fail MAC). |
 | Open DCR abuse | Anyone who can reach `/oauth/register` can create clients; rate-limited per IP. Residual: many source IPs / shared NAT; no admin approval step. |
 | DCR client store theft | Persisted registry includes client secrets; protect `{HIVEMIND_ROOT}/oauth/` (file written `0600`). Rotate by deleting the entry / re-registering; no in-product rotation API yet. |
+| Refresh token store theft | Persisted handles mint new access tokens until TTL/rotation; protect `{HIVEMIND_ROOT}/oauth/refresh_tokens.json` (`0600`). Delete the file or rotate signing/client secrets to invalidate. |
 | Principal spoofing on shared RPC | Blocked: token `sub` overwrites request/env actor. |
 | Cross-tenant read/write | Blocked at storage partition; not blocked by per-principal ACL. |
 | Cleartext on the wire | `REQUIRE_TLS` + reverse-proxy contract; residual if operators skip both. |
-| Token replay within TTL | Short access TTL; refresh handles rotate on use (replay of spent refresh fails). In-memory refresh store (process restart invalidates refresh handles; DCR clients themselves persist). |
+| Token replay within TTL | Short access TTL; refresh handles rotate on use (replay of spent refresh fails). Spent handles are removed from the durable store on rotate. |
 | Token / RPC / register abuse | Per IP+client / IP / IP+principal rate limits; residual if many source IPs or shared NAT. |
 | Poisoned memory as instructions | Trust tiers + quarantine presentation (P0-C); retrieval is evidence, not instructions. |
 | Session laundering of untrusted text | In-process **session taint** on `Service`: after `recall`/`show` returns untrusted or tainted claims, the reader key is marked; later `remember` from that key forces `origin=external` so the write stays tainted and `promote` still refuses below corroborated/human. **Keying:** `principal`, plus `session` when set (`principal` + U+001F + `session`). Shared path uses token `sub` / bootstrap / MCP client id as principal; local stdio uses `HIVEMIND_PRINCIPAL` (+ optional `HIVEMIND_SESSION`). Distinct sessions under one principal do not cross-contaminate. State is memory-only (cleared on process restart); F12 attack-cut measurement remains separate. |

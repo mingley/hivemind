@@ -190,6 +190,9 @@ struct ServeArgs {
     /// Persisted DCR client registry JSON [default: {root}/oauth/dcr_clients.json].
     #[arg(long, env = "HIVEMIND_OAUTH_CLIENTS_PATH")]
     oauth_clients_path: Option<PathBuf>,
+    /// Persisted OAuth refresh-token store JSON [default: {root}/oauth/refresh_tokens.json].
+    #[arg(long, env = "HIVEMIND_OAUTH_REFRESH_PATH")]
+    oauth_refresh_path: Option<PathBuf>,
     /// Skip fsync (tests only).
     #[arg(long, hide = true)]
     no_fsync: bool,
@@ -577,6 +580,7 @@ fn run(cli: Cli) -> Result<()> {
                 register_rate_per_minute: args.register_rate_per_minute,
                 rpc_rate_per_minute: args.rpc_rate_per_minute,
                 oauth_clients_path: args.oauth_clients_path.clone(),
+                oauth_refresh_path: args.oauth_refresh_path.clone(),
             }));
         }
         Command::Backup(args) => {

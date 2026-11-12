@@ -81,6 +81,8 @@ pub struct ServeArgs {
     pub rpc_rate_per_minute: u64,
     /// Durable DCR client registry JSON. Default: `{root}/oauth/dcr_clients.json`.
     pub oauth_clients_path: Option<PathBuf>,
+    /// Durable refresh-token store JSON. Default: `{root}/oauth/refresh_tokens.json`.
+    pub oauth_refresh_path: Option<PathBuf>,
 }
 
 struct AppState {
@@ -110,7 +112,11 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         .oauth_clients_path
         .clone()
         .unwrap_or_else(|| oauth::default_clients_path(&args.root));
-    let oauth = OAuthState::with_clients_path(
+    let refresh_path = args
+        .oauth_refresh_path
+        .clone()
+        .unwrap_or_else(|| oauth::default_refresh_path(&args.root));
+    let oauth = OAuthState::with_persist_paths(
         OAuthConfig {
             issuer: issuer.clone(),
             client_id: args.oauth_client_id.clone(),
@@ -121,6 +127,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
             refresh_token_ttl_secs: args.refresh_token_ttl_secs,
         },
         Some(clients_path.clone()),
+        Some(refresh_path.clone()),
     )?;
 
     let limiter = Arc::new(RateLimiter::new(RateLimitConfig {
@@ -241,6 +248,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         tenant = %args.default_tenant,
         issuer = %issuer,
         oauth_clients = %clients_path.display(),
+        oauth_refresh = %refresh_path.display(),
         require_tls = args.require_tls,
         token_rate_per_minute = args.token_rate_per_minute,
         register_rate_per_minute = args.register_rate_per_minute,

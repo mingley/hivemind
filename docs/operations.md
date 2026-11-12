@@ -76,6 +76,7 @@ tags in one store. Golden fixtures:
 | `HIVEMIND_PUBLIC_BASE` | Public base URL in OAuth metadata | `http://{listen}` |
 | `HIVEMIND_OAUTH_CLIENT_ID` | Pre-registered confidential client id | `hivemind-cli` |
 | `HIVEMIND_OAUTH_CLIENTS_PATH` | Persisted RFC 7591 DCR client registry JSON | `{HIVEMIND_ROOT}/oauth/dcr_clients.json` |
+| `HIVEMIND_OAUTH_REFRESH_PATH` | Persisted OAuth refresh-token handle store JSON | `{HIVEMIND_ROOT}/oauth/refresh_tokens.json` |
 | `HIVEMIND_ACCESS_TOKEN_TTL_SECS` | Access-token lifetime (short TTL) | `300` |
 | `HIVEMIND_REFRESH_TOKEN_TTL_SECS` | Refresh-token lifetime (`authorization_code` / `refresh_token`) | `604800` (7d) |
 | `HIVEMIND_TOKEN_RATE_PER_MINUTE` | Sustained `/oauth/token` rate per client IP+`client_id` (`0` disables) | `60` |
@@ -86,9 +87,9 @@ tags in one store. Golden fixtures:
 
 Flags: `--listen` (default `127.0.0.1:8787`), `--no-grpc`, `--token`,
 `--oauth-client-secret`, `--signing-key`, `--oauth-clients-path`,
-`--access-token-ttl-secs`, `--refresh-token-ttl-secs`, `--token-rate-per-minute`,
-`--register-rate-per-minute`, `--rpc-rate-per-minute`, `--require-tls`,
-`--root`.
+`--oauth-refresh-path`, `--access-token-ttl-secs`, `--refresh-token-ttl-secs`,
+`--token-rate-per-minute`, `--register-rate-per-minute`,
+`--rpc-rate-per-minute`, `--require-tls`, `--root`.
 
 **Rate limits:** in-process token buckets. Excess `/oauth/token`,
 `/oauth/register`, or authenticated RPC returns HTTP `429` with `Retry-After`
@@ -99,7 +100,10 @@ are not rate-limited.
 (machine agents re-auth with the client secret). Interactive
 `authorization_code` + PKCE also returns a `refresh_token`; confidential
 clients (and public DCR clients with `token_endpoint_auth_method=none`)
-exchange it via `grant_type=refresh_token` (refresh rotates). See
+exchange it via `grant_type=refresh_token` (refresh rotates). Refresh handles
+load from `HIVEMIND_OAUTH_REFRESH_PATH` (default
+`{HIVEMIND_ROOT}/oauth/refresh_tokens.json`) on startup and are rewritten
+atomically on issue/rotate so they survive process restart. See
 [SECURITY.md](../SECURITY.md).
 
 **Dynamic Client Registration (RFC 7591):** `POST /oauth/register` (open;
@@ -112,8 +116,7 @@ loaded on startup from
 `HIVEMIND_OAUTH_CLIENTS_PATH` (default `{HIVEMIND_ROOT}/oauth/dcr_clients.json`)
 and rewritten atomically (temp + rename) after each successful register so the
 same `client_id` / secret work across process restarts. The file contains
-secrets — keep the data root private. Refresh-token handles stay in-process
-(restart still forces a fresh authorize). The configured
+secrets — keep the data root private. The configured
 `HIVEMIND_OAUTH_CLIENT_ID` / secret remain valid alongside DCR.
 
 **TLS:** `hivemind serve` speaks plaintext HTTP/gRPC. Production MUST terminate

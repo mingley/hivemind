@@ -15,8 +15,10 @@
 //!
 //! Dynamically registered clients are persisted under the serve data root
 //! (`{HIVEMIND_ROOT}/oauth/dcr_clients.json` by default) so `client_id` /
-//! `client_secret` survive process restart. Refresh-token handles remain
-//! in-process. External IdP federation remains out of scope.
+//! `client_secret` survive process restart. Refresh-token handles are
+//! persisted alongside (`{HIVEMIND_ROOT}/oauth/refresh_tokens.json`) so
+//! interactive clients can rotate across restarts. External IdP federation
+//! remains out of scope.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -41,11 +43,19 @@ const CODE_TTL_SECS: u64 = 300;
 pub const BOOTSTRAP_PRINCIPAL: &str = "bootstrap";
 /// Relative path under `HIVEMIND_ROOT` for the DCR client registry file.
 pub const DEFAULT_OAUTH_CLIENTS_REL: &str = "oauth/dcr_clients.json";
+/// Relative path under `HIVEMIND_ROOT` for the refresh-token handle store.
+pub const DEFAULT_OAUTH_REFRESH_REL: &str = "oauth/refresh_tokens.json";
 const CLIENTS_STORE_VERSION: u32 = 1;
+const REFRESH_STORE_VERSION: u32 = 1;
 
 /// Default on-disk path for persisted DCR clients: `{root}/oauth/dcr_clients.json`.
 pub fn default_clients_path(root: &Path) -> PathBuf {
     root.join(DEFAULT_OAUTH_CLIENTS_REL)
+}
+
+/// Default on-disk path for persisted refresh handles: `{root}/oauth/refresh_tokens.json`.
+pub fn default_refresh_path(root: &Path) -> PathBuf {
+    root.join(DEFAULT_OAUTH_REFRESH_REL)
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +100,22 @@ struct ClientsFile {
     clients: Vec<RegisteredClient>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RefreshFile {
+    version: u32,
+    tokens: Vec<RefreshEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RefreshEntry {
+    handle: String,
+    client_id: String,
+    sub: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resource: Option<String>,
+    exp: u64,
+}
+
 impl RegisteredClient {
     pub fn is_confidential(&self) -> bool {
         self.token_endpoint_auth_method != "none"
@@ -130,6 +156,8 @@ pub struct OAuthState {
     clients: Arc<Mutex<HashMap<String, RegisteredClient>>>,
     /// Durable DCR registry path (`None` = in-memory only, tests).
     clients_path: Option<PathBuf>,
+    /// Durable refresh-token store path (`None` = in-memory only, tests).
+    refresh_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for OAuthState {
@@ -137,6 +165,7 @@ impl std::fmt::Debug for OAuthState {
         f.debug_struct("OAuthState")
             .field("issuer", &self.config.issuer)
             .field("clients_path", &self.clients_path)
+            .field("refresh_path", &self.refresh_path)
             .finish_non_exhaustive()
     }
 }
@@ -150,10 +179,11 @@ struct AuthCode {
     exp: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct RefreshRecord {
     client_id: String,
     sub: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     resource: Option<String>,
     exp: u64,
 }
@@ -178,10 +208,10 @@ pub struct AuthIdentity {
 }
 
 impl OAuthState {
-    /// In-memory OAuth state (no DCR persistence). Prefer
-    /// [`Self::with_clients_path`] for `hivemind serve`.
+    /// In-memory OAuth state (no DCR / refresh persistence). Prefer
+    /// [`Self::with_persist_paths`] for `hivemind serve`.
     pub fn new(config: OAuthConfig) -> Self {
-        Self::with_clients_path(config, None).expect("in-memory OAuthState cannot fail")
+        Self::with_persist_paths(config, None, None).expect("in-memory OAuthState cannot fail")
     }
 
     /// Build OAuth state, loading persisted DCR clients when `clients_path` is set.
@@ -190,22 +220,51 @@ impl OAuthState {
     /// files return an error so operators notice instead of silently dropping
     /// clients. Saves use temp + rename under the same directory.
     pub fn with_clients_path(config: OAuthConfig, clients_path: Option<PathBuf>) -> Result<Self> {
+        Self::with_persist_paths(config, clients_path, None)
+    }
+
+    /// Build OAuth state with durable DCR clients and/or refresh-token stores.
+    ///
+    /// Missing files are empty. Corrupt / unsupported files error at startup.
+    /// Saves use temp + rename under the same directory.
+    pub fn with_persist_paths(
+        config: OAuthConfig,
+        clients_path: Option<PathBuf>,
+        refresh_path: Option<PathBuf>,
+    ) -> Result<Self> {
         let clients = match &clients_path {
             Some(path) => load_clients(path)?,
+            None => HashMap::new(),
+        };
+        let refresh = match &refresh_path {
+            Some(path) => load_refresh(path)?,
             None => HashMap::new(),
         };
         Ok(Self {
             config,
             codes: Arc::new(Mutex::new(HashMap::new())),
-            refresh: Arc::new(Mutex::new(HashMap::new())),
+            refresh: Arc::new(Mutex::new(refresh)),
             clients: Arc::new(Mutex::new(clients)),
             clients_path,
+            refresh_path,
         })
     }
 
     /// Path of the durable DCR client registry, if persistence is enabled.
     pub fn clients_path(&self) -> Option<&Path> {
         self.clients_path.as_deref()
+    }
+
+    /// Path of the durable refresh-token store, if persistence is enabled.
+    pub fn refresh_path(&self) -> Option<&Path> {
+        self.refresh_path.as_deref()
+    }
+
+    fn persist_refresh_map(&self, refresh: &HashMap<String, RefreshRecord>) -> Result<()> {
+        if let Some(path) = &self.refresh_path {
+            save_refresh(path, refresh).context("persist refresh token store")?;
+        }
+        Ok(())
     }
 
     /// Pre-configured confidential client from serve flags / env.
@@ -482,25 +541,13 @@ impl OAuthState {
                     .refresh_token
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("refresh_token required"))?;
-                let record = {
-                    let mut guard = self
-                        .refresh
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("oauth refresh lock poisoned"))?;
-                    // Rotate: consume the presented handle so replay fails.
-                    guard
-                        .remove(presented)
-                        .ok_or_else(|| anyhow::anyhow!("invalid or revoked refresh token"))?
-                };
-                if record.exp < now_secs() {
-                    bail!("refresh token expired");
-                }
-                if record.client_id != client_id {
-                    bail!("client_id mismatch");
-                }
+                let (record, refresh) = self.rotate_refresh_token(
+                    presented,
+                    &client_id,
+                    form.resource.as_deref(),
+                )?;
                 let resource = form.resource.as_deref().or(record.resource.as_deref());
                 let access = self.issue_access_token(&record.sub, resource)?;
-                let refresh = self.issue_refresh_token(&client_id, &record.sub, resource)?;
                 Ok(token_response(
                     &access,
                     self.config.access_token_ttl_secs,
@@ -543,7 +590,55 @@ impl OAuthState {
                 exp: now_secs() + self.config.refresh_token_ttl_secs,
             },
         );
+        if let Err(e) = self.persist_refresh_map(&guard) {
+            guard.remove(&handle);
+            return Err(e);
+        }
         Ok(handle)
+    }
+
+    /// Consume `presented` and issue a rotated handle under one lock + persist.
+    fn rotate_refresh_token(
+        &self,
+        presented: &str,
+        client_id: &str,
+        resource: Option<&str>,
+    ) -> Result<(RefreshRecord, String)> {
+        let mut guard = self
+            .refresh
+            .lock()
+            .map_err(|_| anyhow::anyhow!("oauth refresh lock poisoned"))?;
+        // Rotate: consume the presented handle so replay fails.
+        let record = guard
+            .remove(presented)
+            .ok_or_else(|| anyhow::anyhow!("invalid or revoked refresh token"))?;
+        if record.exp < now_secs() {
+            let _ = self.persist_refresh_map(&guard);
+            bail!("refresh token expired");
+        }
+        if record.client_id != client_id {
+            let _ = self.persist_refresh_map(&guard);
+            bail!("client_id mismatch");
+        }
+        let handle = random_token(32);
+        let resource_owned = resource
+            .map(str::to_owned)
+            .or_else(|| record.resource.clone());
+        guard.insert(
+            handle.clone(),
+            RefreshRecord {
+                client_id: client_id.to_owned(),
+                sub: record.sub.clone(),
+                resource: resource_owned,
+                exp: now_secs() + self.config.refresh_token_ttl_secs,
+            },
+        );
+        if let Err(e) = self.persist_refresh_map(&guard) {
+            guard.remove(&handle);
+            guard.insert(presented.to_owned(), record);
+            return Err(e);
+        }
+        Ok((record, handle))
     }
 
     /// Test helper: insert an already-expired refresh handle.
@@ -761,6 +856,76 @@ fn save_clients(path: &Path, clients: &HashMap<String, RegisteredClient>) -> Res
     };
     let bytes = serde_json::to_vec_pretty(&file).context("serialize DCR clients")?;
     write_atomic(path, &bytes).with_context(|| format!("write DCR clients {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn load_refresh(path: &Path) -> Result<HashMap<String, RefreshRecord>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let bytes = fs::read(path).with_context(|| format!("read refresh tokens {}", path.display()))?;
+    let file: RefreshFile = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse refresh tokens {}", path.display()))?;
+    if file.version != REFRESH_STORE_VERSION {
+        bail!(
+            "unsupported refresh token store version {} (expected {REFRESH_STORE_VERSION})",
+            file.version
+        );
+    }
+    let now = now_secs();
+    let mut map = HashMap::new();
+    for entry in file.tokens {
+        if entry.handle.is_empty() {
+            bail!("refresh token store contains empty handle");
+        }
+        if entry.client_id.is_empty() || entry.sub.is_empty() {
+            bail!("refresh token store entry missing client_id/sub");
+        }
+        // Drop already-expired handles at load so restarts do not revive them.
+        if entry.exp < now {
+            continue;
+        }
+        let record = RefreshRecord {
+            client_id: entry.client_id,
+            sub: entry.sub,
+            resource: entry.resource,
+            exp: entry.exp,
+        };
+        if map.insert(entry.handle, record).is_some() {
+            bail!("refresh token store has duplicate handle");
+        }
+    }
+    Ok(map)
+}
+
+fn save_refresh(path: &Path, refresh: &HashMap<String, RefreshRecord>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create refresh token dir {}", parent.display()))?;
+    }
+    let mut tokens: Vec<RefreshEntry> = refresh
+        .iter()
+        .map(|(handle, record)| RefreshEntry {
+            handle: handle.clone(),
+            client_id: record.client_id.clone(),
+            sub: record.sub.clone(),
+            resource: record.resource.clone(),
+            exp: record.exp,
+        })
+        .collect();
+    tokens.sort_by(|a, b| a.handle.cmp(&b.handle));
+    let file = RefreshFile {
+        version: REFRESH_STORE_VERSION,
+        tokens,
+    };
+    let bytes = serde_json::to_vec_pretty(&file).context("serialize refresh tokens")?;
+    write_atomic(path, &bytes)
+        .with_context(|| format!("write refresh tokens {}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1128,6 +1293,75 @@ mod tests {
             })
             .unwrap();
         assert!(configured["access_token"].as_str().is_some());
+    }
+
+    #[test]
+    fn refresh_tokens_persist_across_reload_and_rotate() {
+        let dir = tempfile::tempdir().unwrap();
+        let refresh_path = default_refresh_path(dir.path());
+        let config = OAuthConfig {
+            issuer: "http://127.0.0.1:8787".into(),
+            client_id: "hivemind-cli".into(),
+            client_secret: "client-secret".into(),
+            signing_key: "signing-key".into(),
+            resource: "http://127.0.0.1:8787/mcp".into(),
+            access_token_ttl_secs: DEFAULT_ACCESS_TOKEN_TTL_SECS,
+            refresh_token_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
+        };
+        let s = OAuthState::with_persist_paths(config.clone(), None, Some(refresh_path.clone()))
+            .unwrap();
+        let (form, _) = auth_code_form(&s);
+        let first = s.exchange_token(&form).unwrap();
+        let refresh = first["refresh_token"].as_str().unwrap().to_owned();
+        assert!(
+            refresh_path.is_file(),
+            "refresh store should be written on issue"
+        );
+
+        // Fresh process: reload handles from disk; refresh grant still works.
+        let reloaded =
+            OAuthState::with_persist_paths(config.clone(), None, Some(refresh_path.clone()))
+                .unwrap();
+        let rotated = reloaded
+            .exchange_token(&TokenForm {
+                grant_type: "refresh_token".into(),
+                client_id: Some("hivemind-cli".into()),
+                client_secret: Some("client-secret".into()),
+                refresh_token: Some(refresh.clone()),
+                ..TokenForm::default()
+            })
+            .unwrap();
+        let new_refresh = rotated["refresh_token"].as_str().unwrap().to_owned();
+        assert_ne!(new_refresh, refresh);
+        let id = reloaded
+            .authenticate(rotated["access_token"].as_str().unwrap(), "x")
+            .unwrap();
+        assert_eq!(id.principal, "hivemind-cli");
+
+        // Old handle remains invalid after rotation + another reload.
+        let again =
+            OAuthState::with_persist_paths(config, None, Some(refresh_path)).unwrap();
+        assert!(
+            again
+                .exchange_token(&TokenForm {
+                    grant_type: "refresh_token".into(),
+                    client_id: Some("hivemind-cli".into()),
+                    client_secret: Some("client-secret".into()),
+                    refresh_token: Some(refresh),
+                    ..TokenForm::default()
+                })
+                .is_err()
+        );
+        let third = again
+            .exchange_token(&TokenForm {
+                grant_type: "refresh_token".into(),
+                client_id: Some("hivemind-cli".into()),
+                client_secret: Some("client-secret".into()),
+                refresh_token: Some(new_refresh),
+                ..TokenForm::default()
+            })
+            .unwrap();
+        assert!(third["access_token"].as_str().is_some());
     }
 
     #[test]
