@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use hivemind::grpc::{self, GrpcArgs};
-use hivemind::oauth::{DEFAULT_ACCESS_TOKEN_TTL_SECS, OAuthConfig, OAuthState};
+use hivemind::oauth::{
+    DEFAULT_ACCESS_TOKEN_TTL_SECS, DEFAULT_REFRESH_TOKEN_TTL_SECS, OAuthConfig, OAuthState,
+};
 use tempfile::tempdir;
 use tonic::Request;
 use tonic::metadata::MetadataValue;
@@ -24,6 +26,7 @@ async fn grpc_hello_and_rpc_with_bearer() {
         signing_key: "grpc-signing-key".into(),
         resource: format!("{issuer}/mcp"),
         access_token_ttl_secs: DEFAULT_ACCESS_TOKEN_TTL_SECS,
+        refresh_token_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
     });
 
     let serve = tokio::spawn(grpc::serve(GrpcArgs {

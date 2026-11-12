@@ -49,11 +49,19 @@ Daemon, `hivemind serve`, and gRPC all call the same tracing init.
 | `HIVEMIND_PUBLIC_BASE` | Public base URL in OAuth metadata | `http://{listen}` |
 | `HIVEMIND_OAUTH_CLIENT_ID` | Pre-registered confidential client id | `hivemind-cli` |
 | `HIVEMIND_ACCESS_TOKEN_TTL_SECS` | Access-token lifetime (short TTL) | `300` |
+| `HIVEMIND_REFRESH_TOKEN_TTL_SECS` | Refresh-token lifetime (`authorization_code` / `refresh_token`) | `604800` (7d) |
 | `HIVEMIND_REQUIRE_TLS` | `1`/`true`/`yes` — refuse start unless `PUBLIC_BASE` is `https://` | unset |
 | `HIVEMIND_GRPC_LISTEN` | gRPC listen address | same host as HTTP, port `8788` |
 
 Flags: `--listen` (default `127.0.0.1:8787`), `--no-grpc`, `--token`,
-`--oauth-client-secret`, `--signing-key`, `--require-tls`, `--root`.
+`--oauth-client-secret`, `--signing-key`, `--access-token-ttl-secs`,
+`--refresh-token-ttl-secs`, `--require-tls`, `--root`.
+
+**OAuth tokens:** `client_credentials` returns a short-lived access token only
+(machine agents re-auth with the client secret). Interactive
+`authorization_code` + PKCE also returns a `refresh_token`; confidential
+clients exchange it via `grant_type=refresh_token` (refresh rotates). See
+[SECURITY.md](../SECURITY.md).
 
 **TLS:** `hivemind serve` speaks plaintext HTTP/gRPC. Production MUST terminate
 TLS at a reverse proxy (or equivalent), set
@@ -104,8 +112,10 @@ cargo build --release -p hivemind
 
 Authenticate JSON API / MCP with `Authorization: Bearer $HIVEMIND_TOKEN`, or
 obtain an OAuth access token via `/oauth/token` using
-`HIVEMIND_OAUTH_CLIENT_SECRET` (client credentials / auth code + PKCE; short
-TTL). Shared-path write attribution uses the token subject, not env TOFU. See
+`HIVEMIND_OAUTH_CLIENT_SECRET` (client credentials; auth code + PKCE with
+refresh; or `refresh_token` grant). Access tokens are short-TTL; refresh
+tokens last until `HIVEMIND_REFRESH_TOKEN_TTL_SECS` and rotate on use.
+Shared-path write attribution uses the token subject, not env TOFU. See
 [SECURITY.md](../SECURITY.md) and [setup-mcp.md](setup-mcp.md).
 
 ## Backup and sync

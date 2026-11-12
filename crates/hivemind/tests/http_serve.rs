@@ -20,6 +20,7 @@ fn test_args(root: std::path::PathBuf, addr: SocketAddr) -> ServeArgs {
         public_base: Some(format!("http://{addr}")),
         oauth_client_id: "hivemind-cli".into(),
         access_token_ttl_secs: DEFAULT_ACCESS_TOKEN_TTL_SECS,
+        refresh_token_ttl_secs: oauth::DEFAULT_REFRESH_TOKEN_TTL_SECS,
         require_tls: false,
         grpc_listen: None,
     }
@@ -120,6 +121,13 @@ async fn health_oauth_metadata_and_rpc() {
             .unwrap()
             .contains("/oauth/token")
     );
+    let grants = as_body["grant_types_supported"].as_array().unwrap();
+    assert!(
+        grants
+            .iter()
+            .any(|g| g.as_str() == Some("refresh_token")),
+        "AS metadata should advertise refresh_token: {as_body}"
+    );
 
     let pr_meta = client
         .get(format!(
@@ -182,6 +190,10 @@ async fn health_oauth_metadata_and_rpc() {
         .await
         .unwrap();
     assert_eq!(token_meta["expires_in"], DEFAULT_ACCESS_TOKEN_TTL_SECS);
+    assert!(
+        token_meta.get("refresh_token").is_none(),
+        "client_credentials must stay access-only"
+    );
 
     // Spoofed actor.principal must be overwritten by token sub (hivemind-cli).
     let remember = client

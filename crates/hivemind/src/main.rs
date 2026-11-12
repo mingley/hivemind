@@ -142,13 +142,20 @@ struct ServeArgs {
     /// OAuth 2.1 client_id for the pre-registered confidential client.
     #[arg(long, default_value = "hivemind-cli", env = "HIVEMIND_OAUTH_CLIENT_ID")]
     oauth_client_id: String,
-    /// Access-token TTL in seconds (short TTL; refresh remains optional/P1).
+    /// Access-token TTL in seconds (short TTL).
     #[arg(
         long,
         default_value_t = hivemind::oauth::DEFAULT_ACCESS_TOKEN_TTL_SECS,
         env = "HIVEMIND_ACCESS_TOKEN_TTL_SECS"
     )]
     access_token_ttl_secs: u64,
+    /// Refresh-token TTL in seconds (authorization_code / refresh_token grants).
+    #[arg(
+        long,
+        default_value_t = hivemind::oauth::DEFAULT_REFRESH_TOKEN_TTL_SECS,
+        env = "HIVEMIND_REFRESH_TOKEN_TTL_SECS"
+    )]
+    refresh_token_ttl_secs: u64,
     /// Refuse start unless HIVEMIND_PUBLIC_BASE is https:// (reverse-proxy TLS).
     /// Also honored via `HIVEMIND_REQUIRE_TLS=1|true|yes`.
     #[arg(long, default_value_t = false)]
@@ -539,6 +546,7 @@ fn run(cli: Cli) -> Result<()> {
                 public_base: args.public_base.clone(),
                 oauth_client_id: args.oauth_client_id.clone(),
                 access_token_ttl_secs: args.access_token_ttl_secs,
+                refresh_token_ttl_secs: args.refresh_token_ttl_secs,
                 require_tls,
                 grpc_listen,
             }));

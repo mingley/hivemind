@@ -3,15 +3,17 @@
 //! Supports:
 //! - Authorization Server Metadata ([RFC 8414](https://datatracker.ietf.org/doc/html/rfc8414))
 //! - Protected Resource Metadata ([RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728))
-//! - `client_credentials` (machine agents)
-//! - `authorization_code` + PKCE S256 (interactive / MCP clients)
+//! - `client_credentials` (machine agents; access token only)
+//! - `authorization_code` + PKCE S256 (interactive / MCP clients; access + refresh)
+//! - `refresh_token` (confidential client; rotates refresh tokens)
 //!
 //! Access tokens are HMAC-BLAKE3 sealed JSON claims with a short TTL (default
-//! 5 minutes). Bootstrap bearer, OAuth client secret, and signing key are
+//! 5 minutes). Refresh tokens are opaque server-side handles with a longer TTL
+//! (default 7 days). Bootstrap bearer, OAuth client secret, and signing key are
 //! **separate** secrets — do not reuse the bootstrap token as the HMAC key.
 //!
-//! Refresh tokens, external IdP federation, and dynamic client registration
-//! remain out of scope (P1).
+//! External IdP federation and dynamic client registration remain out of scope
+//! (P1).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -26,6 +28,8 @@ use sha2::{Digest, Sha256};
 
 /// Default access-token lifetime for the shared service (short TTL).
 pub const DEFAULT_ACCESS_TOKEN_TTL_SECS: u64 = 300;
+/// Default refresh-token lifetime (interactive / long-lived MCP clients).
+pub const DEFAULT_REFRESH_TOKEN_TTL_SECS: u64 = 604_800; // 7 days
 const CODE_TTL_SECS: u64 = 300;
 /// Principal attributed to the bootstrap/admin bearer on the shared path.
 pub const BOOTSTRAP_PRINCIPAL: &str = "bootstrap";
@@ -43,12 +47,15 @@ pub struct OAuthConfig {
     pub resource: String,
     /// Access-token TTL in seconds (short by default).
     pub access_token_ttl_secs: u64,
+    /// Refresh-token TTL in seconds (issued on authorization_code / refresh).
+    pub refresh_token_ttl_secs: u64,
 }
 
 #[derive(Clone)]
 pub struct OAuthState {
     pub config: OAuthConfig,
     codes: Arc<Mutex<HashMap<String, AuthCode>>>,
+    refresh: Arc<Mutex<HashMap<String, RefreshRecord>>>,
 }
 
 impl std::fmt::Debug for OAuthState {
@@ -64,6 +71,14 @@ struct AuthCode {
     client_id: String,
     redirect_uri: String,
     code_challenge: String,
+    resource: Option<String>,
+    exp: u64,
+}
+
+#[derive(Clone, Debug)]
+struct RefreshRecord {
+    client_id: String,
+    sub: String,
     resource: Option<String>,
     exp: u64,
 }
@@ -92,6 +107,7 @@ impl OAuthState {
         Self {
             config,
             codes: Arc::new(Mutex::new(HashMap::new())),
+            refresh: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -101,7 +117,11 @@ impl OAuthState {
             "authorization_endpoint": format!("{}/oauth/authorize", self.config.issuer),
             "token_endpoint": format!("{}/oauth/token", self.config.issuer),
             "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code", "client_credentials"],
+            "grant_types_supported": [
+                "authorization_code",
+                "client_credentials",
+                "refresh_token"
+            ],
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": [
                 "client_secret_post",
@@ -164,8 +184,13 @@ impl OAuthState {
                 {
                     bail!("invalid client credentials");
                 }
+                // Machine clients re-authenticate with the secret; no refresh.
                 let token = self.issue_access_token(&client_id, form.resource.as_deref())?;
-                Ok(token_response(&token, self.config.access_token_ttl_secs))
+                Ok(token_response(
+                    &token,
+                    self.config.access_token_ttl_secs,
+                    None,
+                ))
             }
             "authorization_code" => {
                 let code = form
@@ -206,8 +231,48 @@ impl OAuthState {
                     bail!("PKCE verification failed");
                 }
                 let resource = form.resource.as_deref().or(record.resource.as_deref());
-                let token = self.issue_access_token(&client_id, resource)?;
-                Ok(token_response(&token, self.config.access_token_ttl_secs))
+                let access = self.issue_access_token(&client_id, resource)?;
+                let refresh = self.issue_refresh_token(&client_id, &client_id, resource)?;
+                Ok(token_response(
+                    &access,
+                    self.config.access_token_ttl_secs,
+                    Some(&refresh),
+                ))
+            }
+            "refresh_token" => {
+                // Confidential client only (OAuth norms for this AS).
+                if client_id != self.config.client_id || client_secret != self.config.client_secret
+                {
+                    bail!("invalid client credentials");
+                }
+                let presented = form
+                    .refresh_token
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("refresh_token required"))?;
+                let record = {
+                    let mut guard = self
+                        .refresh
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("oauth refresh lock poisoned"))?;
+                    // Rotate: consume the presented handle so replay fails.
+                    guard
+                        .remove(presented)
+                        .ok_or_else(|| anyhow::anyhow!("invalid or revoked refresh token"))?
+                };
+                if record.exp < now_secs() {
+                    bail!("refresh token expired");
+                }
+                if record.client_id != client_id {
+                    bail!("client_id mismatch");
+                }
+                let resource = form.resource.as_deref().or(record.resource.as_deref());
+                let access = self.issue_access_token(&record.sub, resource)?;
+                let refresh = self.issue_refresh_token(&client_id, &record.sub, resource)?;
+                Ok(token_response(
+                    &access,
+                    self.config.access_token_ttl_secs,
+                    Some(&refresh),
+                ))
             }
             other => bail!("unsupported grant_type: {other}"),
         }
@@ -223,6 +288,44 @@ impl OAuthState {
             resource: resource.map(str::to_owned),
         };
         seal_token(&claims, &self.config.signing_key)
+    }
+
+    fn issue_refresh_token(
+        &self,
+        client_id: &str,
+        sub: &str,
+        resource: Option<&str>,
+    ) -> Result<String> {
+        let handle = random_token(32);
+        let mut guard = self
+            .refresh
+            .lock()
+            .map_err(|_| anyhow::anyhow!("oauth refresh lock poisoned"))?;
+        guard.insert(
+            handle.clone(),
+            RefreshRecord {
+                client_id: client_id.to_owned(),
+                sub: sub.to_owned(),
+                resource: resource.map(str::to_owned),
+                exp: now_secs() + self.config.refresh_token_ttl_secs,
+            },
+        );
+        Ok(handle)
+    }
+
+    /// Test helper: insert an already-expired refresh handle.
+    #[cfg(test)]
+    fn insert_expired_refresh(&self, handle: &str, client_id: &str, sub: &str) {
+        let mut guard = self.refresh.lock().unwrap();
+        guard.insert(
+            handle.to_owned(),
+            RefreshRecord {
+                client_id: client_id.to_owned(),
+                sub: sub.to_owned(),
+                resource: None,
+                exp: now_secs().saturating_sub(1),
+            },
+        );
     }
 
     /// Accept either a sealed OAuth access token or the bootstrap shared bearer.
@@ -266,6 +369,7 @@ pub struct TokenForm {
     pub code: Option<String>,
     pub redirect_uri: Option<String>,
     pub code_verifier: Option<String>,
+    pub refresh_token: Option<String>,
     pub resource: Option<String>,
     pub scope: Option<String>,
 }
@@ -302,13 +406,17 @@ pub fn merge_basic_into_form(form: &mut TokenForm, basic: Option<(String, String
     }
 }
 
-fn token_response(access_token: &str, expires_in: u64) -> Value {
-    json!({
+fn token_response(access_token: &str, expires_in: u64, refresh_token: Option<&str>) -> Value {
+    let mut body = json!({
         "access_token": access_token,
         "token_type": "Bearer",
         "expires_in": expires_in,
         "scope": "hivemind",
-    })
+    });
+    if let Some(refresh) = refresh_token {
+        body["refresh_token"] = Value::String(refresh.to_owned());
+    }
+    body
 }
 
 fn seal_token(claims: &AccessClaims, key: &str) -> Result<String> {
@@ -396,7 +504,33 @@ mod tests {
             signing_key: "signing-key".into(),
             resource: "http://127.0.0.1:8787/mcp".into(),
             access_token_ttl_secs: DEFAULT_ACCESS_TOKEN_TTL_SECS,
+            refresh_token_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
         })
+    }
+
+    fn auth_code_form(s: &OAuthState) -> (TokenForm, String) {
+        let verifier = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let code = s
+            .mint_authorize_code(
+                "hivemind-cli",
+                "http://127.0.0.1/cb",
+                &challenge,
+                "S256",
+                Some("http://127.0.0.1:8787/mcp"),
+            )
+            .unwrap();
+        let form = TokenForm {
+            grant_type: "authorization_code".into(),
+            client_id: Some("hivemind-cli".into()),
+            client_secret: Some("client-secret".into()),
+            code: Some(code),
+            redirect_uri: Some("http://127.0.0.1/cb".into()),
+            code_verifier: Some(verifier.into()),
+            resource: Some("http://127.0.0.1:8787/mcp".into()),
+            ..TokenForm::default()
+        };
+        (form, verifier.to_owned())
     }
 
     #[test]
@@ -411,6 +545,7 @@ mod tests {
         let resp = s.exchange_token(&form).unwrap();
         let token = resp["access_token"].as_str().unwrap();
         assert_eq!(resp["expires_in"], DEFAULT_ACCESS_TOKEN_TTL_SECS);
+        assert!(resp.get("refresh_token").is_none());
 
         // Access token verifies with signing key; bootstrap is a different secret.
         let id = s.authenticate(token, "bootstrap-only").unwrap();
@@ -446,32 +581,89 @@ mod tests {
     #[test]
     fn auth_code_pkce_round_trip() {
         let s = state();
-        let verifier = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
-        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        let code = s
-            .mint_authorize_code(
-                "hivemind-cli",
-                "http://127.0.0.1/cb",
-                &challenge,
-                "S256",
-                Some("http://127.0.0.1:8787/mcp"),
-            )
-            .unwrap();
-        let form = TokenForm {
-            grant_type: "authorization_code".into(),
-            client_id: Some("hivemind-cli".into()),
-            client_secret: Some("client-secret".into()),
-            code: Some(code),
-            redirect_uri: Some("http://127.0.0.1/cb".into()),
-            code_verifier: Some(verifier.into()),
-            resource: Some("http://127.0.0.1:8787/mcp".into()),
-            ..TokenForm::default()
-        };
+        let (form, _) = auth_code_form(&s);
         let resp = s.exchange_token(&form).unwrap();
         let id = s
             .authenticate(resp["access_token"].as_str().unwrap(), "x")
             .unwrap();
         assert_eq!(id.principal, "hivemind-cli");
+        assert!(resp["refresh_token"].as_str().is_some());
+    }
+
+    #[test]
+    fn refresh_token_grant_success_and_rotation() {
+        let s = state();
+        let (form, _) = auth_code_form(&s);
+        let first = s.exchange_token(&form).unwrap();
+        let refresh = first["refresh_token"].as_str().unwrap().to_owned();
+
+        let refreshed = s
+            .exchange_token(&TokenForm {
+                grant_type: "refresh_token".into(),
+                client_id: Some("hivemind-cli".into()),
+                client_secret: Some("client-secret".into()),
+                refresh_token: Some(refresh.clone()),
+                ..TokenForm::default()
+            })
+            .unwrap();
+        let new_access = refreshed["access_token"].as_str().unwrap();
+        let new_refresh = refreshed["refresh_token"].as_str().unwrap();
+        assert_ne!(new_refresh, refresh);
+        let id = s.authenticate(new_access, "x").unwrap();
+        assert_eq!(id.principal, "hivemind-cli");
+
+        // Old refresh handle is consumed (rotation).
+        let replay = s.exchange_token(&TokenForm {
+            grant_type: "refresh_token".into(),
+            client_id: Some("hivemind-cli".into()),
+            client_secret: Some("client-secret".into()),
+            refresh_token: Some(refresh),
+            ..TokenForm::default()
+        });
+        assert!(replay.is_err());
+    }
+
+    #[test]
+    fn refresh_token_rejects_invalid_and_expired() {
+        let s = state();
+        let invalid = s.exchange_token(&TokenForm {
+            grant_type: "refresh_token".into(),
+            client_id: Some("hivemind-cli".into()),
+            client_secret: Some("client-secret".into()),
+            refresh_token: Some("not-a-real-refresh-token".into()),
+            ..TokenForm::default()
+        });
+        assert!(invalid.is_err());
+
+        s.insert_expired_refresh("expired-refresh", "hivemind-cli", "hivemind-cli");
+        let expired = s.exchange_token(&TokenForm {
+            grant_type: "refresh_token".into(),
+            client_id: Some("hivemind-cli".into()),
+            client_secret: Some("client-secret".into()),
+            refresh_token: Some("expired-refresh".into()),
+            ..TokenForm::default()
+        });
+        assert!(expired.is_err());
+
+        // Wrong confidential secret refused.
+        let (form, _) = auth_code_form(&s);
+        let first = s.exchange_token(&form).unwrap();
+        let refresh = first["refresh_token"].as_str().unwrap().to_owned();
+        let bad_secret = s.exchange_token(&TokenForm {
+            grant_type: "refresh_token".into(),
+            client_id: Some("hivemind-cli".into()),
+            client_secret: Some("wrong-secret".into()),
+            refresh_token: Some(refresh),
+            ..TokenForm::default()
+        });
+        assert!(bad_secret.is_err());
+    }
+
+    #[test]
+    fn metadata_advertises_refresh_grant() {
+        let meta = state().authorization_server_metadata();
+        let grants = meta["grant_types_supported"].as_array().unwrap();
+        assert!(grants.iter().any(|g| g.as_str() == Some("refresh_token")));
     }
 
     #[test]

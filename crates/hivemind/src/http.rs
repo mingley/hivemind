@@ -63,6 +63,8 @@ pub struct ServeArgs {
     pub oauth_client_id: String,
     /// Access-token TTL seconds (short by default).
     pub access_token_ttl_secs: u64,
+    /// Refresh-token TTL seconds (authorization_code / refresh_token grants).
+    pub refresh_token_ttl_secs: u64,
     /// When true, refuse to start unless `public_base` is `https://`.
     pub require_tls: bool,
     /// Optional gRPC listen address (spawned alongside HTTP).
@@ -98,6 +100,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         signing_key: args.signing_key.clone(),
         resource: format!("{issuer}/mcp"),
         access_token_ttl_secs: args.access_token_ttl_secs,
+        refresh_token_ttl_secs: args.refresh_token_ttl_secs,
     });
 
     let state = Arc::new(AppState {
@@ -239,6 +242,9 @@ pub fn validate_serve_secrets(args: &ServeArgs) -> Result<()> {
     }
     if args.access_token_ttl_secs == 0 {
         return Err(anyhow!("access token TTL must be > 0"));
+    }
+    if args.refresh_token_ttl_secs == 0 {
+        return Err(anyhow!("refresh token TTL must be > 0"));
     }
     Ok(())
 }

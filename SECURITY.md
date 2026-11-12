@@ -29,11 +29,15 @@ reuse the bootstrap token as the client secret or signing key.
 - **Open:** `/health`, `/readyz`, `/metrics`, `/healthz`, OAuth metadata,
   `/oauth/authorize`, `/oauth/token`.
 - **Protected:** `/v1/tenants…`, `/mcp` — require `Authorization: Bearer …`.
-- **OAuth grants:** `client_credentials` and `authorization_code` + PKCE S256
-  against one pre-registered client (`HIVEMIND_OAUTH_CLIENT_ID`).
+- **OAuth grants:** `client_credentials`, `authorization_code` + PKCE S256, and
+  `refresh_token` against one pre-registered client (`HIVEMIND_OAUTH_CLIENT_ID`).
 - **Access tokens:** sealed claims (`sub`, `iss`, `exp`, …) with a **short TTL**
-  (default 300s, `HIVEMIND_ACCESS_TOKEN_TTL_SECS`). Refresh tokens, DCR, and
-  external IdP federation are out of scope (P1).
+  (default 300s, `HIVEMIND_ACCESS_TOKEN_TTL_SECS`).
+- **Refresh tokens:** opaque server-side handles issued on `authorization_code`
+  (and rotated on `refresh_token`). Default TTL 7 days
+  (`HIVEMIND_REFRESH_TOKEN_TTL_SECS`). Confidential client secret required for
+  refresh. `client_credentials` stays access-only (re-auth with the secret).
+  DCR and external IdP federation remain out of scope (P1).
 - **Principal:** JSON RPC and gRPC overwrite `actor.principal` with the token
   `sub` (or `bootstrap`). Streamable MCP attributes writes to the configured
   OAuth client id. Local stdio MCP still uses env TOFU.
@@ -66,7 +70,7 @@ unless you add an external policy layer.
 | Principal spoofing on shared RPC | Blocked: token `sub` overwrites request/env actor. |
 | Cross-tenant read/write | Blocked at storage partition; not blocked by per-principal ACL. |
 | Cleartext on the wire | `REQUIRE_TLS` + reverse-proxy contract; residual if operators skip both. |
-| Token replay within TTL | Short TTL; no refresh/revocation list yet (P1). |
+| Token replay within TTL | Short access TTL; refresh handles rotate on use (replay of spent refresh fails). In-memory refresh store (process restart invalidates). |
 | Poisoned memory as instructions | Separate trust/quarantine work (P0-C); retrieval is evidence, not instructions. |
 
 ## Reporting

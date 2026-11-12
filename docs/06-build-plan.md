@@ -275,14 +275,14 @@ model weights file (plug any `Embedder` in), ANN, or F4 online quality wins.
   custom axum JSON RPC). Stdio MCP (`hivemind mcp`) remains for local agents.
 - **OAuth 2.1:** authorization-server + protected-resource metadata
   (`/.well-known/oauth-*`); `/oauth/authorize` (auth code + PKCE S256);
-  `/oauth/token` (`authorization_code`, `client_credentials`); sealed HMAC
-  access tokens with a short TTL; `WWW-Authenticate` with `resource_metadata`
-  on 401. Bootstrap bearer, OAuth client secret, and signing key are
-  **separate** (`HIVEMIND_TOKEN` / `HIVEMIND_OAUTH_CLIENT_SECRET` /
-  `HIVEMIND_SIGNING_KEY`). Shared-path write attribution uses the token
-  subject (not env TOFU). **Scoped deferral (P1):** no external IdP
-  federation, no dynamic client registration, no refresh tokens — short TTL
-  + client_credentials cover laptop/team agents talking to this AS.
+  `/oauth/token` (`authorization_code`, `client_credentials`, `refresh_token`);
+  sealed HMAC access tokens with a short TTL; refresh tokens for interactive
+  auth-code clients (confidential refresh; rotated on use);
+  `WWW-Authenticate` with `resource_metadata` on 401. Bootstrap bearer, OAuth
+  client secret, and signing key are **separate** (`HIVEMIND_TOKEN` /
+  `HIVEMIND_OAUTH_CLIENT_SECRET` / `HIVEMIND_SIGNING_KEY`). Shared-path write
+  attribution uses the token subject (not env TOFU). **Scoped deferral (P1):**
+  no external IdP federation, no dynamic client registration.
 - **gRPC:** tonic `hivemind.v1.Hivemind` (`Hello`, `Rpc`, `ChangesSince`) on
   `--grpc-listen` (default port 8788); same bearer/OAuth validation.
 - **Laptop sync helpers:** append-only upload queue + pull cursor JSON under
