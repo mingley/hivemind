@@ -156,9 +156,11 @@ change until then):
   handshake (`hivemind-socket-v1`); idle exit via `HIVEMIND_IDLE_TIMEOUT`
   (default 600s, `0` disables).
 - **`hivemind mcp`:** stdio MCP shim via `rmcp`; finds or starts `hivemindd`.
-- **Six MCP tools** (fixed order): `remember`, `recall`, `show`, `retract`,
-  `feedback`, `changes_since`. Server `instructions` and tool text state the
-  evidence-not-instructions rule (current code wins).
+- **Eight MCP tools** (fixed order): `remember`, `recall`, `show`, `retract`,
+  `forget`, `feedback`, `promote`, `changes_since`. Server `instructions` and
+  tool text state the evidence-not-instructions rule (current code wins).
+  (`forget` / `promote` landed after the original M1 six-tool cut; see
+  [setup-mcp.md](setup-mcp.md#mcp-tools).)
 - **Change feed / read-your-writes:** `Store::changes_since` with optional
   scope / claim / kind filters; `Query.min_offset` and
   `Store::wait_for_offset` so a reader can wait for a prior write offset.
