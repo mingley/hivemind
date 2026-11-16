@@ -345,5 +345,5 @@ production ANN library under all distributions.
 | Session-level taint: did the agent read untrusted content before writing? | Laundering untrusted text into trusted memory | **Shipped (mechanism):** in-process bit on `Service`, keyed by principal[+session]; recall/show of untrusted/tainted sets it; remember forces `origin=external`. See [SECURITY.md](../SECURITY.md). F12 still measures ≥80% attack-cut |
 | Which embedding model, if any, is the default? | Footprint and quality | **Answered:** lexical-only lean default; optional Model2Vec via `--features embeddings` ([operations.md](operations.md#embeddings-optional-lean-default-is-lexical-only)). Hybrid ≥10% win not evidenced |
 | What erasure SLA, and is crypto-shredding enough legally? | Privacy compliance for shared use | **Shipped:** `forget` physical purge + online SLA in [operations.md](operations.md#erasure--forget-privacy-sla). Legal fitness per jurisdiction remains operator/compliance |
-| License for the repository | Adoption and contributions | Owner decision before the first release |
+| License for the repository | Adoption and contributions | **Answered:** MIT — see [LICENSE](../LICENSE) |
 | Default event encoding (JSON v1 now) | Size, speed, and canonical hashing | **Landed:** postcard codec 2 optional; JSON remains default — [operations.md](operations.md#event-codec) |

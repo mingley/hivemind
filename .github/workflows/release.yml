@@ -52,15 +52,16 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          cp target/release/hivemind target/release/hivemindd dist/
-          (cd dist && sha256sum hivemind hivemindd > SHA256SUMS)
-          tar -C dist -czf hivemind-linux-x86_64.tar.gz hivemind hivemindd SHA256SUMS
+          cp target/release/hivemind target/release/hivemindd LICENSE dist/
+          (cd dist && sha256sum hivemind hivemindd LICENSE > SHA256SUMS)
+          tar -C dist -czf hivemind-linux-x86_64.tar.gz hivemind hivemindd LICENSE SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: hivemind-linux-x86_64
           path: |
             dist/hivemind
             dist/hivemindd
+            dist/LICENSE
             dist/SHA256SUMS
             hivemind-linux-x86_64.tar.gz
           if-no-files-found: error

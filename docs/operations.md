@@ -3,7 +3,7 @@
 Operator guide for running hivemind as a local daemon or shared HTTP/gRPC
 service. **Ops surfaces** (health probes, metrics, release packaging, container
 image) are in place. For product-level residual risks (HA, external IdP, RSS,
-F1–F12, LazyFS CI, LICENSE), see the
+F1–F12, LazyFS CI), see the
 [README residual risks](../README.md#residual-risks) — this runbook does not
 claim multi-node HA or legal certification.
 
@@ -238,7 +238,7 @@ the LazyFS power-loss gap: [f13-crash-injection.md](f13-crash-injection.md).
 - **Release packaging:** `.github/workflows/release.yml` — installs `protoc`,
   then on `main` pushes, `v*` tags, and `workflow_dispatch` first requires the reusable Ubuntu/macOS, capacity, and LazyFS gates, then builds Linux
   release binaries and uploads artifact `hivemind-linux-x86_64` (`hivemind`,
-  `hivemindd`, `SHA256SUMS`, and a `.tar.gz`). On `v*` tags a nonempty `LICENSE` is required and the same tarball
+  `hivemindd`, `LICENSE`, `SHA256SUMS`, and a `.tar.gz`). On `v*` tags a nonempty `LICENSE` is required and the same tarball
   and `SHA256SUMS` are also attached to a GitHub Release.
 
 Local equivalent:

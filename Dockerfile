@@ -19,6 +19,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/hivemind /usr/local/bin/hivemind
 COPY --from=build /src/target/release/hivemindd /usr/local/bin/hivemindd
+COPY LICENSE /usr/share/doc/hivemind/LICENSE
 RUN useradd --system --create-home --home-dir /var/lib/hivemind --shell /usr/sbin/nologin hivemind \
     && mkdir -p /var/lib/hivemind \
     && chown -R hivemind:hivemind /var/lib/hivemind
