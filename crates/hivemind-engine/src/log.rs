@@ -23,9 +23,11 @@
 //! dropping data silently. A later record can exist only if the earlier one was
 //! flushed first.
 
+use parking_lot::RwLock;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::fsutil::{self, ensure_disk_space};
@@ -93,8 +95,14 @@ pub struct Recovery {
     pub created: bool,
 }
 
+// (first event offset, segment base, record byte position), every ~128 events.
+// Rebuilt during validated replay; never changes the persistent format.
+type SeekAnchor = (u64, u64, u64);
+const SEEK_STRIDE: u64 = 128;
+
 #[derive(Debug)]
 pub struct Log {
+    anchors: Arc<RwLock<Vec<SeekAnchor>>>,
     dir: PathBuf,
     durability: Durability,
     segment_bytes: u64,
@@ -141,6 +149,7 @@ impl Log {
             ..Recovery::default()
         };
         let mut expected = 0u64;
+        let mut anchors: Vec<SeekAnchor> = Vec::new();
         let mut active_len = SEGMENT_HEADER_LEN;
         let last = segments.len() - 1;
         for (i, &base) in segments.iter().enumerate() {
@@ -156,8 +165,15 @@ impl Log {
             }
             let mut reader = SegmentReader::open(&path, base)?;
             let problem = loop {
+                let record_start = reader.pos;
+                let first_offset = reader.next_offset;
                 match reader.step()? {
                     Step::Record => {
+                        if anchors.last().is_none_or(|last| {
+                            last.1 != base || first_offset >= last.0 + SEEK_STRIDE
+                        }) {
+                            anchors.push((first_offset, base, record_start));
+                        }
                         for (offset, event) in reader.events() {
                             if offset >= apply_from {
                                 visit(offset, event)?;
@@ -205,6 +221,7 @@ impl Log {
             .open(segment_path(dir, active_base))?;
         active.seek(SeekFrom::Start(active_len))?;
         let log = Log {
+            anchors: Arc::new(RwLock::new(anchors)),
             dir: dir.to_path_buf(),
             durability,
             segment_bytes,
@@ -254,6 +271,14 @@ impl Log {
             self.poisoned = true;
             return Err(e);
         }
+        let base = *self.segments.last().expect("active segment");
+        let mut anchors = self.anchors.write();
+        if anchors
+            .last()
+            .is_none_or(|last| last.1 != base || first >= last.0 + SEEK_STRIDE)
+        {
+            anchors.push((first, base, self.active_len - record.len() as u64));
+        }
         self.next_offset = first + u64::from(count);
         Ok(first)
     }
@@ -287,6 +312,7 @@ impl Log {
     /// A read-only view of everything acknowledged so far.
     pub fn view(&self) -> LogView {
         LogView {
+            anchors: self.anchors.clone(),
             dir: self.dir.clone(),
             segments: self.segments.clone(),
             end: self.next_offset,
@@ -414,6 +440,7 @@ fn find_event_location(dir: &Path, segments: &[u64], target: u64) -> Result<Even
 /// acknowledged when the view was taken. Safe to use while the log appends.
 #[derive(Clone, Debug)]
 pub struct LogView {
+    anchors: Arc<RwLock<Vec<SeekAnchor>>>,
     dir: PathBuf,
     segments: Vec<u64>,
     end: u64,
@@ -449,6 +476,20 @@ impl LogView {
             .saturating_sub(1);
         for &base in &self.segments[start..] {
             let mut reader = SegmentReader::open(&segment_path(&self.dir, base), base)?;
+            if base <= from {
+                let anchors = self.anchors.read();
+                let at = anchors
+                    .partition_point(|anchor| anchor.0 <= from)
+                    .saturating_sub(1);
+                if let Some(&(offset, anchor_base, pos)) = anchors.get(at)
+                    && anchor_base == base
+                    && pos > SEGMENT_HEADER_LEN
+                {
+                    reader.reader.seek(SeekFrom::Start(pos))?;
+                    reader.pos = pos;
+                    reader.next_offset = offset;
+                }
+            }
             loop {
                 match reader.step()? {
                     Step::Record => {

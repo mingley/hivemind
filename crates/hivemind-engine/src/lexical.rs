@@ -11,7 +11,11 @@
 //! dictionary is full, rare new tokens are dropped so vocabulary growth from
 //! code-like text cannot unbounded-grow RSS.
 
+use smallvec::SmallVec;
 use std::collections::HashMap;
+
+/// Most identifier terms occur in one document; keep that posting inline.
+pub type PostingList = SmallVec<[(u32, u32); 1]>;
 
 /// BM25 term-frequency saturation.
 pub const K1: f32 = 1.2;
@@ -90,9 +94,9 @@ fn split_camel(word: &str) -> Vec<&str> {
 /// immutable. Excluding inactive documents is the caller's job.
 #[derive(Debug)]
 pub struct LexicalIndex {
-    dict: HashMap<String, u32>,
+    dict: HashMap<Box<str>, u32>,
     /// Term ID to `(doc, term frequency)` pairs, in increasing doc order.
-    postings: Vec<Vec<(u32, u32)>>,
+    postings: Vec<PostingList>,
     doc_len: Vec<u32>,
     total_len: u64,
     max_terms: usize,
@@ -132,13 +136,21 @@ impl LexicalIndex {
             self.doc_len.len(),
             "documents are dense and in order"
         );
-        let tokens = tokenize(text);
-        let mut frequencies: HashMap<&str, u32> = HashMap::new();
-        for token in &tokens {
-            *frequencies.entry(token).or_default() += 1;
-        }
-        for (term, tf) in frequencies {
-            let id = match self.dict.get(term) {
+        let mut tokens = tokenize(text);
+        let len = tokens.len() as u32;
+        // Sorting avoids a fresh hash table on every insert and makes token
+        // admission deterministic when the dictionary cap is reached.
+        tokens.sort_unstable();
+        let mut at = 0;
+        while at < tokens.len() {
+            let term = &tokens[at];
+            let mut end = at + 1;
+            while end < tokens.len() && tokens[end] == *term {
+                end += 1;
+            }
+            let tf = (end - at) as u32;
+            at = end;
+            let id = match self.dict.get(term.as_str()) {
                 Some(&id) => id,
                 None if self.dict.len() >= self.max_terms => {
                     self.dropped_new_terms += 1;
@@ -146,14 +158,13 @@ impl LexicalIndex {
                 }
                 None => {
                     let id = self.postings.len() as u32;
-                    self.dict.insert(term.to_owned(), id);
-                    self.postings.push(Vec::new());
+                    self.dict.insert(term.clone().into_boxed_str(), id);
+                    self.postings.push(PostingList::new());
                     id
                 }
             };
             self.postings[id as usize].push((doc, tf));
         }
-        let len = tokens.len() as u32;
         self.doc_len.push(len);
         self.total_len += u64::from(len);
     }
@@ -187,7 +198,7 @@ impl LexicalIndex {
         &self.doc_len
     }
 
-    pub fn posting_lists(&self) -> &[Vec<(u32, u32)>] {
+    pub fn posting_lists(&self) -> &[PostingList] {
         &self.postings
     }
 
@@ -196,7 +207,7 @@ impl LexicalIndex {
         let n = self.postings.len();
         let mut out: Vec<Option<&str>> = vec![None; n];
         for (term, &id) in &self.dict {
-            out[id as usize] = Some(term);
+            out[id as usize] = Some(term.as_ref());
         }
         out.into_iter()
             .map(|slot| slot.unwrap_or_default())
@@ -207,6 +218,16 @@ impl LexicalIndex {
     /// increasing document order. Scores accumulate in a dense array, which is
     /// much faster than a hash map when common terms touch many documents.
     pub fn search(&self, query: &str) -> Vec<(u32, f32)> {
+        self.search_where(query, |_| true)
+    }
+
+    /// Preserve global BM25 statistics while excluding irrelevant documents
+    /// before scoring. The predicate is evaluated once per matching document.
+    pub fn search_where(
+        &self,
+        query: &str,
+        mut accept: impl FnMut(u32) -> bool,
+    ) -> Vec<(u32, f32)> {
         let n = self.doc_len.len();
         if n == 0 {
             return Vec::new();
@@ -215,9 +236,9 @@ impl LexicalIndex {
         let mut terms = tokenize(query);
         terms.sort_unstable();
         terms.dedup();
-        let postings: Vec<&Vec<(u32, u32)>> = terms
+        let postings: Vec<&PostingList> = terms
             .iter()
-            .filter_map(|term| self.dict.get(term))
+            .filter_map(|term| self.dict.get(term.as_str()))
             .map(|id| &self.postings[*id as usize])
             .collect();
         if postings.is_empty() {
@@ -229,13 +250,20 @@ impl LexicalIndex {
             let df = list.len() as f32;
             let idf = (1.0 + (n as f32 - df + 0.5) / (df + 0.5)).ln();
             for &(doc, tf) in list {
+                let slot = &mut scores[doc as usize];
+                if *slot < 0.0 {
+                    continue;
+                }
+                if *slot == 0.0 {
+                    if !accept(doc) {
+                        *slot = -1.0;
+                        continue;
+                    }
+                    touched.push(doc);
+                }
                 let tf = tf as f32;
                 let len = self.doc_len[doc as usize] as f32;
                 let score = idf * tf * (K1 + 1.0) / (tf + K1 * (1.0 - B + B * len / avg_len));
-                let slot = &mut scores[doc as usize];
-                if *slot == 0.0 {
-                    touched.push(doc);
-                }
                 *slot += score;
             }
         }
@@ -250,6 +278,40 @@ impl LexicalIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filtered_search_preserves_scores_and_checks_each_doc_once() {
+        let mut index = LexicalIndex::default();
+        for i in 0..50 {
+            index.add(i, &format!("shared common token code{i} shared"));
+        }
+        let expected: Vec<_> = index
+            .search("shared common code12")
+            .into_iter()
+            .filter(|(doc, _)| doc % 3 == 0)
+            .collect();
+        let mut checked = std::collections::BTreeSet::new();
+        let actual = index.search_where("shared common code12", |doc| {
+            assert!(checked.insert(doc));
+            doc % 3 == 0
+        });
+        assert_eq!(actual, expected);
+        index.clear_doc(12);
+        assert!(!index.search("code12").iter().any(|(doc, _)| *doc == 12));
+    }
+
+    #[test]
+    fn capped_dictionary_admission_is_replay_deterministic() {
+        let mut first = LexicalIndex::with_max_terms(3);
+        let mut second = LexicalIndex::with_max_terms(3);
+        first.add(0, "zebra alpha omega beta");
+        second.add(0, "zebra alpha omega beta");
+        assert_eq!(first.terms_ordered(), second.terms_ordered());
+        assert_eq!(
+            first.search("zebra alpha omega beta"),
+            second.search("zebra alpha omega beta")
+        );
+    }
 
     #[test]
     fn keeps_compounds_and_emits_parts() {

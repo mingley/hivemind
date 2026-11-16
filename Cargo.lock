@@ -1126,6 +1126,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "smallvec",
  "tempfile",
  "thiserror 2.0.21",
  "uuid",

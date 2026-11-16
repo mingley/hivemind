@@ -6,6 +6,8 @@
   - work:WI-200
   when: {}
   fields:
+    goal: Complete WI-200 auth middleware
     done: all
     remaining: none
+    next_step: Archive closed work
   status: expired

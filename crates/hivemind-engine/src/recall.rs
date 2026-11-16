@@ -208,7 +208,12 @@ pub(crate) fn recall(state: &State, query: &Query) -> Recall {
             .map(|doc| (doc, 1.0))
             .collect()
     } else {
-        state.lexical.search(&query.text)
+        state.lexical.search_where(&query.text, |doc| {
+            let row = &state.claims[doc as usize];
+            (query.scopes.is_empty() || query.scopes.contains(&row.scope))
+                && row.status != Status::Forgotten
+                && (query.include_history || row.status == Status::Active)
+        })
     };
 
     let vector_hits: Vec<(u32, f32)> = query
@@ -573,9 +578,9 @@ pub(crate) fn detail_with_citations(
         event: row.event,
         supersedes: row.supersedes.clone(),
         superseded_by: row.superseded_by,
-        retraction: row.retraction.clone(),
-        invalidation: row.invalidation.clone(),
-        forgetting: row.forgetting.clone(),
+        retraction: row.retraction.as_deref().cloned(),
+        invalidation: row.invalidation.as_deref().cloned(),
+        forgetting: row.forgetting.as_deref().cloned(),
         tainted: row.tainted,
         feedback: row.feedback.clone(),
         last_validated_at: row.last_validated_at,

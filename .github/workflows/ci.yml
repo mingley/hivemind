@@ -52,9 +52,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
         run: cargo test --workspace --locked
-      - name: Capacity budget (Linux; replay only)
+      - name: Capacity and latency budgets (Linux)
         if: runner.os == 'Linux'
-        run: cargo run --release --locked -p hivemind-engine --example rss_harness -- --seed-log --max-rss-mb 512 100000
+        run: cargo run --release --locked -p hivemind-engine --example bench -- 100000 --check
       - name: 1,000-cycle crash soak (Linux)
         if: runner.os == 'Linux'
         env:

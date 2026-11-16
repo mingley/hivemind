@@ -563,6 +563,7 @@ Agent B on another machine resumes from the handoff.
             ],
             "when": {"branch": "feat/rate-limit"},
             "fields": {
+                "goal": "Complete WI-441 rate limiter and HTTP middleware",
                 "done": "1 token bucket core; 2 Redis backend; 3 metrics hooks",
                 "remaining": "4 fix burst window inclusive end; 5 HTTP middleware",
                 "next_step": "In limiter.py allow(key) treat window end as inclusive; re-run test_burst_window",
@@ -607,7 +608,7 @@ Agent B on another machine resumes from the handoff.
             "statement": "WI-200 auth middleware handoff from last month — unrelated closed work.",
             "about": ["work:WI-200"],
             "when": {},
-            "fields": {"done": "all", "remaining": "none"},
+            "fields": {"goal": "Complete WI-200 auth middleware", "done": "all", "remaining": "none", "next_step": "Archive closed work"},
             "status": "expired",
         }
     ],
@@ -1441,6 +1442,7 @@ and change notifications. Agent 1 crashes holding a lease on the parser module.
             "about": ["file:src/parser.py", "sym:parse_frame", "work:WI-900"],
             "when": {"branch": "feat/parse-recover"},
             "fields": {
+                "goal": "Complete WI-900 parse_frame rewrite",
                 "done": "CRC stub in parse_frame",
                 "remaining": "finish length-prefix; wire error recovery tests",
                 "next_step": "After lease TTL, reclaim with fencing token >7 and continue length-prefix",

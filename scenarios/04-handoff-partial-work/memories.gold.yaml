@@ -11,6 +11,7 @@
   when:
     branch: feat/rate-limit
   fields:
+    goal: Complete WI-441 rate limiter and HTTP middleware
     done: 1 token bucket core; 2 Redis backend; 3 metrics hooks
     remaining: 4 fix burst window inclusive end; 5 HTTP middleware
     next_step: In limiter.py allow(key) treat window end as inclusive; re-run test_burst_window

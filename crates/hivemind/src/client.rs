@@ -14,7 +14,7 @@ use crate::protocol::{self, Hello, PROTOCOL, Request, Response};
 
 #[derive(Debug)]
 pub struct Client {
-    stream: UnixStream,
+    io: BufReader<UnixStream>,
     next_id: u64,
     pub hello: Hello,
 }
@@ -28,7 +28,7 @@ impl Client {
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
         stream.set_write_timeout(Some(Duration::from_secs(30)))?;
         let mut client = Self {
-            stream,
+            io: BufReader::new(stream),
             next_id: 1,
             hello: Hello {
                 protocol: String::new(),
@@ -77,13 +77,13 @@ impl Client {
         };
         let mut line = serde_json::to_string(&req)?;
         line.push('\n');
-        self.stream
+        self.io
+            .get_mut()
             .write_all(line.as_bytes())
             .context("write request")?;
-        self.stream.flush()?;
-        let mut reader = BufReader::new(self.stream.try_clone()?);
+        self.io.get_mut().flush()?;
         let mut response_line = String::new();
-        reader
+        self.io
             .read_line(&mut response_line)
             .context("read response")?;
         if response_line.is_empty() {
@@ -119,9 +119,14 @@ fn spawn_daemon(store_dir: &Path, daemon_bin: &Path) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // Detach: the daemon double-forks itself; here we just start it.
-    cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("spawn {}", daemon_bin.display()))?;
+    // Reap failed startup races and eventual idle exits while the client stays
+    // alive. The daemon itself runs in the foreground with redirected stdio.
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 

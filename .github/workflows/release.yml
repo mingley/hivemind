@@ -1,18 +1,12 @@
 name: release
 
-# Linux release binaries. PR CI stays on ci.yml only; this runs on main
-# pushes, version tags, and manual dispatch. See docs/operations.md.
-# protoc is required for the gRPC build of crates/hivemind.
-# On v* tags, the tarball is also attached to a GitHub Release.
-
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,56 +14,104 @@ env:
 jobs:
   checks:
     uses: ./.github/workflows/ci.yml
-    permissions:
-      contents: read
-  linux:
+  package:
     needs: checks
-    name: build linux binaries
-    runs-on: ubuntu-latest
+    name: package (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+          - os: ubuntu-22.04-arm
+            platform: linux-aarch64
+          - os: macos-15-intel
+            platform: macos-x86_64
+          - os: macos-15
+            platform: macos-aarch64
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v7
       - name: Install protoc
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
-          protoc --version
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            brew install protobuf
+          else
+            sudo apt-get update
+            sudo apt-get install -y protobuf-compiler
+          fi
       - name: Install Rust
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+        run: rustup toolchain install stable --profile minimal && rustup default stable
       - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-release-${{ hashFiles('Cargo.lock') }}
+          key: release-${{ matrix.platform }}-${{ hashFiles('Cargo.lock') }}
       - name: Build release binaries
         run: cargo build --release --locked -p hivemind
-      - name: Require a release license
-        if: startsWith(github.ref, 'refs/tags/')
-        run: test -s LICENSE
-      - name: Package
+      - name: Package and verify extracted binaries
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
-          mkdir -p dist
+          test -s LICENSE
+          case "$PLATFORM" in
+            *-aarch64) [[ "$(uname -m)" == arm64 || "$(uname -m)" == aarch64 ]] ;;
+            *-x86_64) [[ "$(uname -m)" == x86_64 ]] ;;
+          esac
+          mkdir -p dist extracted
           cp target/release/hivemind target/release/hivemindd LICENSE dist/
-          (cd dist && sha256sum hivemind hivemindd LICENSE > SHA256SUMS)
-          tar -C dist -czf hivemind-linux-x86_64.tar.gz hivemind hivemindd LICENSE SHA256SUMS
+          strip dist/hivemind dist/hivemindd
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            (cd dist && shasum -a 256 hivemind hivemindd LICENSE > SHA256SUMS)
+          else
+            (cd dist && sha256sum hivemind hivemindd LICENSE > SHA256SUMS)
+          fi
+          tar -C dist -czf "hivemind-$PLATFORM.tar.gz" hivemind hivemindd LICENSE SHA256SUMS
+          tar -xzf "hivemind-$PLATFORM.tar.gz" -C extracted
+          ./scripts/smoke-release.sh extracted
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            shasum -a 256 "hivemind-$PLATFORM.tar.gz" > "hivemind-$PLATFORM.sha256"
+          else
+            sha256sum "hivemind-$PLATFORM.tar.gz" > "hivemind-$PLATFORM.sha256"
+          fi
       - uses: actions/upload-artifact@v4
         with:
-          name: hivemind-linux-x86_64
+          name: hivemind-${{ matrix.platform }}
           path: |
-            dist/hivemind
-            dist/hivemindd
-            dist/LICENSE
-            dist/SHA256SUMS
-            hivemind-linux-x86_64.tar.gz
+            hivemind-${{ matrix.platform }}.tar.gz
+            hivemind-${{ matrix.platform }}.sha256
           if-no-files-found: error
-      - name: Publish GitHub Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
         with:
+          pattern: hivemind-*
+          merge-multiple: true
+          path: release-assets
+      - name: Combine archive checksums and installation guide
+        run: |
+          cp scripts/install.sh release-assets/install.sh
+          cp docs/quickstart.md release-assets/QUICKSTART.md
+          cat release-assets/*.sha256 > release-assets/SHA256SUMS
+          (cd release-assets && sha256sum install.sh QUICKSTART.md >> SHA256SUMS)
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: docs/releases/v0.1.0.md
           files: |
-            hivemind-linux-x86_64.tar.gz
-            dist/SHA256SUMS
+            release-assets/*.tar.gz
+            release-assets/SHA256SUMS
+            release-assets/install.sh
+            release-assets/QUICKSTART.md
           fail_on_unmatched_files: true

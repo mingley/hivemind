@@ -29,6 +29,7 @@
   when:
     branch: feat/parse-recover
   fields:
+    goal: Complete WI-900 parse_frame rewrite
     done: CRC stub in parse_frame
     remaining: finish length-prefix; wire error recovery tests
     next_step: After lease TTL, reclaim with fencing token >7 and continue length-prefix

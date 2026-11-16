@@ -45,3 +45,16 @@ fn scenario_01_hivemind_hits_gold() {
     );
     assert!(m.hits_at_k > 0, "expected at least one hit, got {m:?}");
 }
+
+#[test]
+fn all_seed_scenarios_run_against_current_engine_contract() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios");
+    let scenarios = hivebench::scenario::load_scenarios(root).unwrap();
+    assert_eq!(scenarios.len(), 12);
+    for scenario in scenarios {
+        hivebench::scenario::validate_scenario(&scenario).unwrap();
+        let metrics = run_er(&scenario, Condition::Hivemind, 8)
+            .unwrap_or_else(|error| panic!("{}: {error:#}", scenario.meta.id));
+        assert_eq!(metrics.probes, scenario.probes.len());
+    }
+}

@@ -101,7 +101,7 @@ fn rss_mb() -> f64 {
         .map_or(f64::NAN, |kb| kb / 1024.0)
 }
 
-fn report(label: &str, latencies: &mut [Duration]) {
+fn report(label: &str, latencies: &mut [Duration]) -> Duration {
     latencies.sort();
     println!(
         "{label} ({} samples): p50 {:?}, p95 {:?}, p99 {:?}",
@@ -110,6 +110,7 @@ fn report(label: &str, latencies: &mut [Duration]) {
         percentile(latencies, 0.95),
         percentile(latencies, 0.99)
     );
+    percentile(latencies, 0.95)
 }
 
 fn main() {
@@ -117,6 +118,8 @@ fn main() {
         .nth(1)
         .and_then(|a| a.parse().ok())
         .unwrap_or(100_000);
+    assert!(n > 0, "claim count must be positive");
+    let mut ids = Vec::new();
     let dir = tempfile::tempdir().expect("temp dir");
     let actor = Actor::agent("bench");
     let scopes: Vec<Scope> = (0..20)
@@ -130,6 +133,7 @@ fn main() {
 
     let no_fsync = Options {
         durability: Durability::NoFsync,
+        max_claims: n.saturating_add(200),
         ..Options::default()
     };
     let start = Instant::now();
@@ -140,7 +144,10 @@ fn main() {
             if i % (n / 200).max(1) == 0 {
                 queries.push((query, scopes[i % scopes.len()].clone()));
             }
-            store.remember(&actor, Remember::new(data)).unwrap();
+            let receipt = store.remember(&actor, Remember::new(data)).unwrap();
+            if i % (n / 200).max(1) == 0 {
+                ids.push(receipt.claim.unwrap());
+            }
         }
         let stats = store.stats();
         println!(
@@ -153,7 +160,14 @@ fn main() {
     }
 
     let start = Instant::now();
-    let store = Store::open(dir.path(), Options::default()).unwrap();
+    let store = Store::open(
+        dir.path(),
+        Options {
+            max_claims: n.saturating_add(200),
+            ..Options::default()
+        },
+    )
+    .unwrap();
     println!(
         "replay on open: {:.2} s; rss after replay: {:.1} MB",
         start.elapsed().as_secs_f64(),
@@ -173,7 +187,7 @@ fn main() {
         scoped.push(start.elapsed());
         hits += usize::from(!result.cards.is_empty());
     }
-    report("recall within one scope", &mut scoped);
+    let scoped_p95 = report("recall within one scope", &mut scoped);
     println!("queries with at least one card: {hits}/{}", queries.len());
 
     let mut global = Vec::new();
@@ -186,7 +200,15 @@ fn main() {
         store.recall(&query);
         global.push(start.elapsed());
     }
-    report("recall across all scopes", &mut global);
+    let global_p95 = report("recall across all scopes", &mut global);
+
+    let mut shows = Vec::new();
+    for id in &ids {
+        let start = Instant::now();
+        assert!(store.get(id, None).is_some());
+        shows.push(start.elapsed());
+    }
+    let show_p95 = report("expand full claim by id", &mut shows);
 
     let mut writes = Vec::new();
     for i in 0..200 {
@@ -195,6 +217,25 @@ fn main() {
         store.remember(&actor, Remember::new(data)).unwrap();
         writes.push(start.elapsed());
     }
-    report("write acknowledged after fsync", &mut writes);
-    println!("rss at end: {:.1} MB", rss_mb());
+    let write_p95 = report("write acknowledged after fsync", &mut writes);
+    let final_rss = rss_mb();
+    println!("rss at end: {final_rss:.1} MB");
+    if std::env::args().any(|arg| arg == "--check") {
+        for (name, actual, max_ms) in [
+            ("scoped recall", scoped_p95, 50),
+            ("global recall", global_p95, 50),
+            ("claim expansion", show_p95, 20),
+            ("durable write", write_p95, 20),
+        ] {
+            assert!(
+                actual <= Duration::from_millis(max_ms),
+                "{name} p95 {actual:?} exceeds {max_ms} ms"
+            );
+        }
+        assert!(
+            final_rss.is_finite() && final_rss <= 256.0,
+            "RSS {final_rss} MiB exceeds the 256 MiB benchmark budget"
+        );
+        println!("Performance budgets passed.");
+    }
 }

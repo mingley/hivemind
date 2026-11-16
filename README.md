@@ -92,37 +92,32 @@ Other commands: `retract`, `invalidate`, `link`, `feedback`, `put`, `cat`,
 
 ## Status and measurements
 
-M0 latency (Apple M4 Pro, 100k synthetic claims) still holds as the
-published latency baseline. **RSS was re-measured** after keydir / interning /
-token-type caps (2026-11-12, linux/x86_64 cloud agent, release, no embedder)
-with multi-N
-`cargo run --release -p hivemind-engine --example rss_harness -- 10000 100000`
-(or `./scripts/rss_scale_1m.sh`; same generator seed as `examples/bench`;
-RSS = `ps -o rss=` for that PID):
+Native downloads: [v0.1.0](https://github.com/mingley/hivemind/releases/tag/v0.1.0)
+for Apple Silicon / Intel Macs and Linux x86-64 / ARM64. See the
+[quickstart](docs/quickstart.md) to install, run a one-minute test, and connect
+Codex or Claude Code without compiling Rust.
 
-| Metric | Result |
+Release-build measurements on Linux/x86_64, 100k synthetic claims across
+20 scopes, lexical-only:
+
+| Operation | p95 |
 |---|---|
-| Recall within one scope (M0, M4 Pro) | p95 1.0 ms |
-| Recall across all scopes (M0, M4 Pro) | p95 4.8 ms |
-| Write acknowledged after `F_FULLFSYNC` (M0, M4 Pro) | p95 8.9 ms |
-| Replay on open (10k / 100k, linux mid-scale) | ~0.18 s / ~2.0 s |
-| RSS after replay, 100k claims | **~219 MB** post-mitigation (M0 pre-mitigation 230 MB on M4 Pro) — ≤ 50 MB ❌ |
-| RSS after replay, 10k claims | **~30 MB** (under the 50 MB line at this size) |
+| Recall within one scope | 1.10 ms |
+| Recall across scopes | 8.29 ms |
+| Expand full claim by id | 0.154 ms |
+| Write acknowledged after fsync | 3.07 ms |
 
-**Residual:** in-memory BM25 dictionary (hits the 250k term cap on this
-synthetic vocab) plus keydir rows (statement caches, applicability maps).
-`Store::seal_lexical` writes a segment file but today’s
-`LexicalSegment::open` copies into an anonymous map and does not free the
-live heap, so sealing is **not** an RSS win yet. Cheap operator knob:
-lower `Options.max_terms` for adversarial vocab; next real cut needs
-file-backed mmap search that drops live postings (or a denser keydir).
+Replay-only RSS is **117.0 MiB at 100k** and **882.2 MiB at 1M**; replay takes
+2.26 s / 23.99 s. At 20k, same-host scoped recall improved ~1.9× and global
+recall ~2.9×; 100k replay memory fell ~44%. The original 50 MB laptop goal
+remains unmet at 100k. The supported deployment envelope is explicit:
+default 100k admission cap, at least 512 MiB provisioned per active store plus
+request/backup overhead. [Full methodology and operating limits](docs/performance.md).
 
-Details: [06](docs/06-build-plan.md#m0-status-engine-core-done-2026-11-10)
-and [M1 status](docs/06-build-plan.md#m1-status-daemon-and-mcp-done-2026-11-11).
-
-Every change runs `cargo fmt --check`, `cargo clippy --all-targets -- -D
-warnings`, and `cargo test`. The test suite includes a `kill -9` crash loop
-that checks every acknowledged write survives.
+CI gates formatting, Clippy, workspace tests, 100k latency/RSS budgets,
+1,000-cycle SIGKILL survival, and LazyFS cache-loss tests. Every native release
+archive is extracted and smoke-tested for remember/recall, verify,
+backup/restore, and daemon sharing before publication.
 
 ## Residual risks
 
@@ -132,7 +127,7 @@ Honest gaps — none of these are presented as “fully production certified”:
 |---|---|
 | **Multi-node HA** | Explicit NON-goal. One node + restore from complete log/manifest/blob backups ([operations.md](docs/operations.md)). No leader election / multi-region active-active. |
 | **IdP / DCR** | Shared OAuth 2.1 AS is in-process (PKCE + client_credentials + refresh_token + RFC 7591 DCR, short access TTL, separated secrets). DCR clients persist under `{HIVEMIND_ROOT}/oauth/dcr_clients.json`; refresh handles under `{HIVEMIND_ROOT}/oauth/refresh_tokens.json`. DCR is disabled by default; enabling it still requires bootstrap admin registration/approval. Server-owned tenant grants deny cross-tenant access. External IdP federation is an explicit **NON-goal** (in-process AS only). |
-| **Capacity** | Default admission cap: 100k claims/store; measured replay RSS 209.1 MiB (512 MiB CI budget). Opt-in 1M: 1,675.8 MiB / 23.76 s replay. Original 50 MB laptop target remains unmet; see [capacity envelope](docs/operations.md#supported-capacity-and-measured-envelope). |
+| **Capacity** | Default admission cap: 100k claims/store; measured replay RSS 117.0 MiB (256 MiB CI benchmark budget). Opt-in 1M: 882.2 MiB / 23.99 s replay. Original 50 MB laptop target remains unmet; see [capacity envelope](docs/operations.md#supported-capacity-and-measured-envelope). |
 | **Embeddings default** | **Lexical-only** remains the lean default (F4): no embedder required for remember/recall. Optional Model2Vec via `--features embeddings` + `--embedder model2vec` ([operations.md](docs/operations.md#embeddings-optional-lean-default-is-lexical-only)); hybrid ≥10% win not evidenced in-repo. |
 | **F1–F12 research** | Mechanisms for trust, citations, hybrid recall, etc. ship; outcome / attack-efficacy measurements (F1–F12) remain open research, not ship blockers. |
 | **Durability CI** | Frame goldens, property tests, 12-cycle `kill -9` smoke plus a 1,000-cycle Linux soak, and a pinned LazyFS drop-unsynced-data job gate CI/release packaging. The LazyFS test includes an unsynced negative control, acknowledged claims/blobs, erasure, and reopen verification ([F13](docs/f13-crash-injection.md)). |

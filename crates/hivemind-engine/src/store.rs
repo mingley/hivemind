@@ -1142,7 +1142,10 @@ impl Store {
         let Some(row) = state.row(&claim) else {
             return Vec::new();
         };
-        let hits = state.lexical.search(statement);
+        let hits = state.lexical.search_where(statement, |doc| {
+            let other = &state.claims[doc as usize];
+            other.scope == row.scope && other.status == Status::Active
+        });
         let own = hits
             .iter()
             .find(|(doc, _)| *doc == row.doc)

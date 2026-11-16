@@ -84,7 +84,7 @@ pub struct ClaimRow {
     pub kind: ClaimKind,
     pub scope: Scope,
     pub about: Vec<Arc<str>>,
-    pub applies_when: BTreeMap<String, String>,
+    pub applies_when: Arc<BTreeMap<String, String>>,
     pub review_by: Option<Timestamp>,
     /// Short statement for recall cards; may be truncated.
     pub statement_cache: String,
@@ -106,9 +106,9 @@ pub struct ClaimRow {
     pub supersedes: Vec<ClaimId>,
     pub superseded_by: Option<ClaimId>,
     pub superseded_at: Option<Timestamp>,
-    pub retraction: Option<Retraction>,
-    pub invalidation: Option<Invalidation>,
-    pub forgetting: Option<Forgetting>,
+    pub retraction: Option<Box<Retraction>>,
+    pub invalidation: Option<Box<Invalidation>>,
+    pub forgetting: Option<Box<Forgetting>>,
     /// Derived from external content, directly or through `derived_from`.
     pub tainted: bool,
     pub feedback: FeedbackTally,
@@ -228,6 +228,7 @@ impl Interner {
 
 #[derive(Debug)]
 pub struct State {
+    condition_sets: HashMap<BTreeMap<String, String>, Arc<BTreeMap<String, String>>>,
     pub(crate) claims: Vec<ClaimRow>,
     by_id: HashMap<ClaimId, u32>,
     pub(crate) by_entity: HashMap<Arc<str>, Vec<u32>>,
@@ -257,6 +258,7 @@ impl Default for State {
 impl State {
     pub fn new(max_terms: usize) -> Self {
         Self {
+            condition_sets: HashMap::new(),
             claims: Vec::new(),
             by_id: HashMap::new(),
             by_entity: HashMap::new(),
@@ -330,7 +332,7 @@ impl State {
             row.statement_cache.clear();
             row.statement_truncated = false;
             row.about.clear();
-            row.applies_when.clear();
+            row.applies_when = Arc::default();
             row.evidence_count = 0;
             row.citations_count = 0;
             row.derived_from.clear();
@@ -341,12 +343,12 @@ impl State {
             row.invalidation = None;
             row.last_validated_at = None;
             row.tainted = false;
-            row.forgetting = Some(Forgetting {
+            row.forgetting = Some(Box::new(Forgetting {
                 reason: reason.to_owned(),
                 recorded_at: at,
                 by: Arc::clone(by),
                 purged_blobs: purged_blobs.to_vec(),
-            });
+            }));
         }
     }
 
@@ -413,12 +415,12 @@ impl State {
             } => match self.row_mut(claim) {
                 Some(row) => {
                     row.status = Status::Invalidated;
-                    row.invalidation = Some(Invalidation {
+                    row.invalidation = Some(Box::new(Invalidation {
                         at: *when,
                         reason: reason.clone(),
                         recorded_at: at,
                         by: Arc::clone(&by),
-                    });
+                    }));
                 }
                 None => known = false,
             },
@@ -430,13 +432,13 @@ impl State {
             } => match self.row_mut(claim) {
                 Some(row) => {
                     row.status = Status::Retracted;
-                    row.retraction = Some(Retraction {
+                    row.retraction = Some(Box::new(Retraction {
                         reason: *reason,
                         note: note.clone(),
                         corrected_by: *corrected_by,
                         recorded_at: at,
                         by: Arc::clone(&by),
-                    });
+                    }));
                 }
                 None => known = false,
             },
@@ -589,6 +591,23 @@ impl State {
         self.next_offset = offset + 1;
     }
 
+    fn intern_conditions(
+        &mut self,
+        conditions: &BTreeMap<String, String>,
+    ) -> Arc<BTreeMap<String, String>> {
+        if let Some(shared) = self.condition_sets.get(conditions) {
+            return shared.clone();
+        }
+        let shared = Arc::new(conditions.clone());
+        // Reuse common contexts without retaining a second copy of arbitrarily
+        // many unique maps supplied by writers.
+        if self.condition_sets.len() < 1024 {
+            self.condition_sets
+                .insert(conditions.clone(), shared.clone());
+        }
+        shared
+    }
+
     fn insert_claim(
         &mut self,
         offset: u64,
@@ -643,13 +662,14 @@ impl State {
             .as_deref()
             .map(|s| self.intern.intern(s));
         self.by_id.insert(id, doc);
+        let applies_when = self.intern_conditions(&data.applies_when);
         self.claims.push(ClaimRow {
             doc,
             id,
             kind: data.kind,
             scope,
             about,
-            applies_when: data.applies_when.clone(),
+            applies_when,
             review_by: data.review_by,
             statement_cache,
             statement_truncated,

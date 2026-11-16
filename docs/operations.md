@@ -231,21 +231,26 @@ the LazyFS power-loss gap: [f13-crash-injection.md](f13-crash-injection.md).
 
 ## Release binaries (CI)
 
-- **PR / every push to `main`:** `.github/workflows/ci.yml` — installs
-  `protoc`, then `cargo fmt --check`,
-  `cargo clippy --workspace --all-targets --locked -- -D warnings`,
-  `cargo test --workspace --locked` on Ubuntu and macOS.
-- **Release packaging:** `.github/workflows/release.yml` — installs `protoc`,
-  then on `main` pushes, `v*` tags, and `workflow_dispatch` first requires the reusable Ubuntu/macOS, capacity, and LazyFS gates, then builds Linux
-  release binaries and uploads artifact `hivemind-linux-x86_64` (`hivemind`,
-  `hivemindd`, `LICENSE`, `SHA256SUMS`, and a `.tar.gz`). On `v*` tags a nonempty `LICENSE` is required and the same tarball
-  and `SHA256SUMS` are also attached to a GitHub Release.
+[Download v0.1.0](https://github.com/mingley/hivemind/releases/tag/v0.1.0)
+or use the [quickstart installer](quickstart.md). Native archives support
+macOS 13+ on Apple Silicon and Intel, and Linux glibc 2.35+ on x86-64 / ARM64.
+Each contains `hivemind`, `hivemindd`, `LICENSE`, and binary `SHA256SUMS`.
+The release includes archive-level checksums, the installer and quickstart.
+
+`.github/workflows/ci.yml` gates fmt, Clippy, Ubuntu/macOS workspace tests,
+default-capacity latency/RSS budgets, 1,000 SIGKILL cycles and LazyFS cache loss.
+`.github/workflows/release.yml` requires those checks, then builds four native
+packages on Ubuntu 22.04 / macOS 15 runners. Each package is extracted and
+smoke-tested for durable memory, recall, verification, backup/restore, and
+shared daemon use. Only after every platform succeeds does a `v*` tag publish
+all downloads in one GitHub Release. Main pushes run CI; manual release-workflow dispatch builds native artifacts
+without publishing. Version tags publish only after all checks and package smokes pass.
 
 Local equivalent:
 
 ```bash
 cargo build --release --locked -p hivemind
-# artifacts: target/release/hivemind  target/release/hivemindd
+./scripts/smoke-release.sh target/release
 ```
 
 ## Container
@@ -375,8 +380,8 @@ Ops packaging (CI gates, release artifacts, `/health` plus `/readyz` `/metrics`,
 structured logs, Dockerfile) has landed. **Local MCP:** Claude Code’s default
 Bash sandbox leaves MCP outside the boundary — proven wiring and
 remember→recall→show smoke live in [setup-mcp.md](setup-mcp.md). Footprint:
-post-mitigation RSS at 100k synthetic claims is still ~219 MB (≤ 50 MB miss;
-10k ~30 MB pass; `./scripts/rss_scale_1m.sh`);
+post-mitigation RSS at 100k synthetic claims is still ~117 MiB (≤ 50 MB miss;
+10k ~16 MiB pass; `./scripts/rss_scale_1m.sh`);
 see [README](../README.md#status-and-measurements) /
 [06](06-build-plan.md). Erasure (`forget`) and its online SLA are documented
 above; backup retention remains an operator policy. Full residual-risk table:
@@ -412,16 +417,16 @@ seed `0x9E3779B97F4A7C15`, warm filesystem; KiB RSS from `ps` converted to MiB):
 
 | Claims | Replay | RSS |
 |---|---|---|
-| 10,000 | 0.24 s | 25.8 MiB |
-| 100,000 | 2.68 s | 209.1 MiB |
-| 1,000,000 | 23.76 s | 1,675.8 MiB |
+| 10,000 | 0.19 s | 15.8 MiB |
+| 100,000 | 2.26 s | 117.0 MiB |
+| 1,000,000 | 23.99 s | 882.2 MiB |
 
 Reproduce with `cargo run --release --locked -p hivemind-engine --example
 rss_harness -- --seed-log --max-rss-mb 2560 10000 100000 1000000`.
 `--seed-log` validates/encodes claims directly into the log, bypassing ingest
 similarity search; these figures measure replay and footprint, **not write
 throughput, concurrency, or end-to-end latency**. Normal harness mode exercises
-`remember`. CI enforces a 512 MiB replay budget at 100k. Provision at least
+`remember`. CI enforces a 256 MiB process RSS budget plus recall/write/expansion latency ceilings at 100k (normal write path); see [performance.md](performance.md). Provision at least
 512 MiB per active store, plus request/backup/embedding overhead; opt-in 1M
 stores need at least 2.5 GiB per active store and tolerate ~24 s replay on this
 host. Many tenants multiply these requirements. Payload size and vocabulary

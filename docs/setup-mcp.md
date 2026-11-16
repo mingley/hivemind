@@ -1,33 +1,17 @@
 # MCP setup: Claude Code, Codex CLI, Copilot CLI
 
-Status: 2026-11-12. Local stdio MCP for agents; shared-service ops
+Status: 2026-11-16. Local stdio MCP for agents; shared-service ops
 (health, metrics, serve, container, forget SLA) live in
 [operations.md](operations.md). Product status and residual risks (HA, external
 IdP, RSS, F1–F12, LazyFS CI) live in the
-[README](../README.md#residual-risks). Shared-service MCP clients can use
-`POST /oauth/register` (RFC 7591 DCR) instead of a pre-shared client secret;
-see [operations.md](operations.md) and [SECURITY.md](../SECURITY.md).
+[README](../README.md#residual-risks). Shared-service clients use operator-provisioned OAuth credentials.
+DCR is disabled by default and registration/authorization approval require the
+bootstrap admin bearer; see [operations.md](operations.md) and [SECURITY.md](../SECURITY.md).
 
-Engine RSS mitigations (keydir, interning, token-type caps) are **landed**.
-Post-mitigation mid-scale re-measure: ~30 MB @ 10k / ~219 MB @ 100k
-synthetic claims on linux/x86_64 (100k still above the ≤ 50 MB target) —
-methodology and residual in
-[06](06-build-plan.md#m1-status-daemon-and-mcp-done-2026-11-11)
-(`./scripts/rss_scale_1m.sh`).
-
-**Proven local path:** Claude Code with its default per-command Bash
-sandbox. Claude Code runs MCP servers **outside** that sandbox, so
-`hivemind mcp` may spawn `hivemindd` and use the store Unix socket without
-extra Seatbelt/bubblewrap rules. See [Claude Code](#claude-code) below.
-
-hivemind exposes memory to coding agents as an MCP server. The agent talks
-stdio MCP to `hivemind mcp`; that shim finds or starts `hivemindd`, which owns
-the store and serves a Unix-socket JSON protocol.
-
-**Evidence, not instructions.** Every tool description and the server
-`instructions` field say the same thing: memory is evidence with provenance;
-current code and tests take precedence over anything retrieved here. Agents
-must treat recall results as untrusted context, not as orders.
+For prebuilt binaries, start with [download and quickstart](quickstart.md).
+Replay-only RSS is now ~15.8 MiB @ 10k / ~117.0 MiB @ 100k synthetic claims;
+see [performance methodology](performance.md). The 50 MB goal is still unmet
+at 100k; production sizing uses the documented per-store envelope.
 
 ## Build
 
