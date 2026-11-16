@@ -68,6 +68,9 @@ jobs:
           cp target/release/hivemind target/release/hivemindd LICENSE dist/
           strip dist/hivemind dist/hivemindd
           if [[ "$RUNNER_OS" == macOS ]]; then
+            codesign --force --sign - dist/hivemind dist/hivemindd
+            codesign --verify --strict dist/hivemind
+            codesign --verify --strict dist/hivemindd
             (cd dist && shasum -a 256 hivemind hivemindd LICENSE > SHA256SUMS)
           else
             (cd dist && sha256sum hivemind hivemindd LICENSE > SHA256SUMS)

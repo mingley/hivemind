@@ -54,7 +54,9 @@ impl Client {
             return Ok(client);
         }
         spawn_daemon(store_dir, daemon_bin)?;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Large stores may spend tens of seconds validating/replaying before
+        // binding their socket. Keep retrying through that supported cold start.
+        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             match Self::connect(store_dir) {
                 Ok(client) => return Ok(client),

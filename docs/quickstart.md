@@ -19,8 +19,8 @@ The installer selects your OS/CPU, verifies SHA-256 checksums, and installs
 `hivemind` and `hivemindd` into `~/.local/bin`. To choose another destination,
 set `HIVEMIND_INSTALL_DIR=/your/bin`. Both binaries must stay in the same
 directory so MCP can find the daemon. Add that directory to your shell's PATH
-for future sessions. The macOS binaries are unsigned; an independently imposed
-Gatekeeper policy can require approving the downloaded binaries before use.
+for future sessions. The macOS binaries are ad-hoc signed without Developer ID notarization; a
+browser download or local Gatekeeper policy can require approving them before use.
 
 Manual download: https://github.com/mingley/hivemind/releases/tag/v0.1.0
 Each archive contains both binaries, the MIT license, and binary checksums.

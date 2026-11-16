@@ -197,7 +197,8 @@ codex mcp list
 ```
 
 Raise `startup_timeout_sec` if cold start (daemon spawn + store open) exceeds
-the default on a large store.
+the default on a large store. Use at least `60` for opt-in large stores; the
+MCP shim also waits up to 60 seconds for the daemon's socket during replay.
 
 **Sandbox note:** Codex’s macOS Seatbelt path can deny `AF_UNIX` connect
 unless you allowlist the daemon socket (Codex ≥ 0.121.0
