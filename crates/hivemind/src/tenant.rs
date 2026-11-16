@@ -9,7 +9,9 @@ use anyhow::{Result, bail};
 
 /// Validate a tenant id used as a single path component.
 pub fn validate_tenant_id(id: &str) -> Result<()> {
-    let id = id.trim();
+    if id != id.trim() {
+        bail!("tenant id must not contain surrounding whitespace");
+    }
     if id.is_empty() || id.len() > 128 {
         bail!("tenant id must be 1-128 characters");
     }

@@ -21,7 +21,7 @@ use hivemind_core::{
     EventBody, EventId, EvidenceRef, Origin, Outcome, RetractReason, Scope, Status, Timestamp,
     check_promotion,
 };
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Mutex, ReentrantMutex, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::blob::BlobStore;
@@ -47,8 +47,12 @@ const MAX_NOTE_CHARS: usize = 2_000;
 const MAX_KEY_CHARS: usize = 200;
 const MAX_PRINCIPAL_CHARS: usize = 200;
 
+pub const DEFAULT_MAX_CLAIMS: usize = 100_000;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
+    /// Admission limit per store; existing data always remains readable.
+    pub max_claims: usize,
     pub durability: Durability,
     pub segment_bytes: u64,
     /// Cap on distinct BM25 token types. New rare tokens are dropped once the
@@ -65,6 +69,7 @@ impl Default for Options {
         Self {
             durability: Durability::Fsync,
             segment_bytes: DEFAULT_SEGMENT_BYTES,
+            max_claims: DEFAULT_MAX_CLAIMS,
             max_terms: DEFAULT_MAX_TERMS,
             event_codec: EventCodec::JsonV1,
         }
@@ -75,6 +80,16 @@ impl Options {
     /// Apply `HIVEMIND_EVENT_CODEC` when set (see [`EventCodec::from_env`]).
     pub fn with_env_overrides(mut self) -> Result<Self> {
         self.event_codec = EventCodec::from_env()?;
+        if let Ok(limit) = std::env::var("HIVEMIND_MAX_CLAIMS") {
+            self.max_claims = limit.parse().map_err(|_| {
+                Error::Invalid("HIVEMIND_MAX_CLAIMS must be a positive integer".into())
+            })?;
+            if self.max_claims == 0 {
+                return Err(Error::Invalid(
+                    "HIVEMIND_MAX_CLAIMS must be positive".into(),
+                ));
+            }
+        }
         Ok(self)
     }
 }
@@ -152,6 +167,7 @@ pub struct LeaseReceipt {
 /// Result of [`Store::backup_segments`].
 #[derive(Clone, Debug, Serialize)]
 pub struct BackupReport {
+    pub blobs: usize,
     pub store_id: String,
     pub segments: usize,
     pub segment_bases: Vec<u64>,
@@ -250,6 +266,8 @@ impl VerifyReport {
 }
 
 pub struct Store {
+    max_claims: usize,
+    maintenance: ReentrantMutex<()>,
     dir: PathBuf,
     manifest: Manifest,
     log: Mutex<Log>,
@@ -346,6 +364,8 @@ impl Store {
             None => create_manifest(&dir, sync)?,
         };
         let store = Self {
+            max_claims: options.max_claims,
+            maintenance: ReentrantMutex::new(()),
             dir,
             manifest,
             log: Mutex::new(log),
@@ -358,6 +378,22 @@ impl Store {
             event_codec: options.event_codec,
             _lock: lock,
         };
+        let pending: Vec<_> = store
+            .state
+            .read()
+            .claims()
+            .iter()
+            .filter(|r| r.status == Status::Forgotten)
+            .map(|r| r.id)
+            .collect();
+        for id in pending {
+            store.forget(
+                &Actor::agent("hivemind-erasure-recovery"),
+                id,
+                "resume interrupted erasure",
+                None,
+            )?;
+        }
         if store.recovery.truncated_bytes > 0 {
             store.record_recovery()?;
         }
@@ -416,6 +452,7 @@ impl Store {
     /// Write a projection checkpoint covering every acknowledged event so far.
     /// Subsequent opens apply the pack and skip re-applying those log offsets.
     pub fn checkpoint(&self) -> Result<SnapshotInfo> {
+        let _maintenance = self.maintenance.lock();
         let log = self.log.lock();
         let view = log.view();
         let next_offset = view.end();
@@ -449,6 +486,7 @@ impl Store {
 
     /// Records a new claim, optionally superseding active claims in the same event.
     pub fn remember(&self, actor: &Actor, request: Remember) -> Result<Receipt> {
+        let _maintenance = self.maintenance.lock();
         let Remember {
             mut data,
             supersedes,
@@ -466,6 +504,9 @@ impl Store {
         let statement = data.statement.clone();
         let receipt = self
             .commit(actor, idempotency_key, |state| {
+                if state.claims().len() >= self.max_claims {
+                    return Err(Error::Invalid(format!("store capacity reached ({} claims); raise HIVEMIND_MAX_CLAIMS only after provisioning its memory budget", self.max_claims)));
+                }
                 let mut seen = BTreeSet::new();
                 for old in &supersedes {
                     if !seen.insert(*old) {
@@ -545,34 +586,89 @@ impl Store {
         self.state.read().vectors.len()
     }
 
-    /// Copy durable log segments (and MANIFEST) to `dest` for cold backup / shipping.
-    /// Returns the number of segment files copied. The active segment is included;
-    /// callers that want only sealed segments can filter by comparing sizes later.
+    /// Publish a consistent cold backup containing log, manifest, and every
+    /// live artifact blob. Destination must be absent or empty. Writers and
+    /// erasure are held until the backup has been flushed and atomically published.
     pub fn backup_segments(&self, dest: &Path) -> Result<BackupReport> {
-        fs::create_dir_all(dest)?;
-        let log_src = self.dir.join("log");
-        let log_dst = dest.join("log");
-        fs::create_dir_all(&log_dst)?;
-        let view = self.log.lock().view();
-        let mut segments = Vec::new();
-        for &base in view.segment_bases() {
-            let name = format!("{base:020}.hlog");
-            let from = log_src.join(&name);
-            let to = log_dst.join(&name);
-            fs::copy(&from, &to)?;
-            segments.push(base);
+        let _maintenance = self.maintenance.lock();
+        let absolute = std::path::absolute(dest)?;
+        let parent = absolute
+            .parent()
+            .ok_or_else(|| Error::Invalid("backup needs a parent directory".into()))?;
+        fs::create_dir_all(parent)?;
+        let parent = fs::canonicalize(parent)?;
+        let dest = parent.join(
+            absolute
+                .file_name()
+                .ok_or_else(|| Error::Invalid("backup needs a directory name".into()))?,
+        );
+        let source = fs::canonicalize(&self.dir)?;
+        if dest.starts_with(&source) || source.starts_with(&dest) {
+            return Err(Error::Invalid(
+                "backup destination must be outside the source store".into(),
+            ));
         }
-        let manifest_src = self.dir.join(MANIFEST);
-        if manifest_src.exists() {
-            fs::copy(&manifest_src, dest.join(MANIFEST))?;
+        if dest.exists()
+            && (dest.symlink_metadata()?.file_type().is_symlink()
+                || fs::read_dir(&dest)?.next().is_some())
+        {
+            return Err(Error::Invalid(
+                "backup destination must be absent or empty".into(),
+            ));
         }
-        Ok(BackupReport {
-            store_id: self.manifest.store_id.clone(),
-            segments: segments.len(),
-            segment_bases: segments,
-            next_offset: view.end(),
-            dest: dest.to_path_buf(),
-        })
+        let staging = parent.join(format!(
+            ".hivemind-backup-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        fs::create_dir(&staging)?;
+        let result = (|| {
+            let log_dst = staging.join("log");
+            fs::create_dir(&log_dst)?;
+            let log = self.log.lock();
+            let view = log.view();
+            let segments = view.segment_bases().to_vec();
+            for &base in &segments {
+                let name = format!("{base:020}.hlog");
+                let target = log_dst.join(&name);
+                fs::copy(self.dir.join("log").join(name), &target)?;
+                File::open(&target)?.sync_all()?;
+            }
+            fsutil::sync_dir(&log_dst)?;
+            let hashes: Vec<_> = self.state.read().artifacts.keys().copied().collect();
+            let blob_dir = staging.join("blobs");
+            fs::create_dir(&blob_dir)?;
+            for hash in &hashes {
+                let bytes = self.blobs.get(hash)?; // validate content hash before publishing
+                let hex = hash.to_hex();
+                let shard = blob_dir.join(&hex[..2]);
+                fs::create_dir_all(&shard)?;
+                fsutil::write_atomic(&shard.join(&hex[2..]), &bytes, true)?;
+            }
+            fsutil::sync_dir(&blob_dir)?;
+            fsutil::write_atomic(
+                &staging.join(MANIFEST),
+                &fs::read(self.dir.join(MANIFEST))?,
+                true,
+            )?;
+            fsutil::sync_dir(&staging)?;
+            if dest.exists() {
+                fs::remove_dir(&dest)?;
+            }
+            fs::rename(&staging, &dest)?;
+            fsutil::sync_dir(&parent)?;
+            Ok(BackupReport {
+                store_id: self.manifest.store_id.clone(),
+                segments: segments.len(),
+                segment_bases: segments,
+                next_offset: view.end(),
+                blobs: hashes.len(),
+                dest,
+            })
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result
     }
 
     /// Rebuild all vectors from claim statement caches using the current embedder.
@@ -626,6 +722,7 @@ impl Store {
         reason: &str,
         idempotency_key: Option<String>,
     ) -> Result<Receipt> {
+        let _maintenance = self.maintenance.lock();
         let reason = clean_note(reason)?;
         if reason.trim().is_empty() {
             return Err(Error::Invalid(
@@ -698,14 +795,14 @@ impl Store {
         // Physical purge of the ClaimAsserted payload (history rewrite).
         self.redact_claim_asserted(offset, kind)?;
 
-        // Best-effort blob delete for exclusive artifacts.
+        // Do not acknowledge erasure until every exclusive artifact is gone.
         for hash in &purged_blobs {
-            let _ = self.blobs.delete(hash);
+            self.blobs.delete(hash)?;
         }
 
         // Snapshots may still hold pre-redaction bytes; drop them so reopen
         // replays the redacted log.
-        let _ = snapshot::invalidate_all(&self.dir.join("snapshots"));
+        snapshot::invalidate_all(&self.dir.join("snapshots"))?;
 
         Ok(receipt)
     }
@@ -948,6 +1045,7 @@ impl Store {
         name: Option<String>,
         origin: Origin,
     ) -> Result<(BlobHash, Option<Receipt>)> {
+        let _maintenance = self.maintenance.lock();
         if let Some(kind) = hygiene::find_secret(&String::from_utf8_lossy(bytes)) {
             return Err(Error::Secret(kind));
         }
@@ -986,6 +1084,7 @@ impl Store {
         idempotency_key: Option<String>,
         build: impl FnOnce(&State) -> Result<Option<EventBody>>,
     ) -> Result<Option<Receipt>> {
+        let _maintenance = self.maintenance.lock();
         check_actor(actor)?;
         if let Some(key) = &idempotency_key
             && (key.is_empty() || key.chars().count() > MAX_KEY_CHARS)

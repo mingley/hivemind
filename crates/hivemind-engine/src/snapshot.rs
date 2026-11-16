@@ -128,6 +128,7 @@ pub fn invalidate_all(snapshots_dir: &Path) -> Result<usize> {
             removed += 1;
         }
     }
+    fsutil::sync_dir(snapshots_dir)?;
     Ok(removed)
 }
 

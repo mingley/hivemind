@@ -10,6 +10,9 @@
 //!    today's `LexicalSegment::open` copies into an anonymous map and does
 //!    **not** free the live BM25 heap, so expect RSS to stay flat or rise).
 //!
+//! `--seed-log` bypasses similarity queries during seed generation to isolate
+//! replay/footprint at 1M. `--max-rss-mb` makes a measured budget a failing gate.
+//!
 //! Multi-N: pass several claim counts; ingest is incremental on one store, with
 //! a full reopen/replay measurement at each checkpoint (sorted ascending).
 //!
@@ -113,6 +116,8 @@ struct Args {
     dir: Option<PathBuf>,
     progress: bool,
     seal: bool,
+    seed_log: bool,
+    max_rss: Option<f64>,
 }
 
 fn parse_args() -> Args {
@@ -120,6 +125,8 @@ fn parse_args() -> Args {
     let mut dir = None;
     let mut progress = false;
     let mut seal = false;
+    let mut seed_log = false;
+    let mut max_rss = None;
     let mut raw = std::env::args().skip(1);
     while let Some(a) = raw.next() {
         match a.as_str() {
@@ -132,9 +139,18 @@ fn parse_args() -> Args {
             }
             "--progress" => progress = true,
             "--seal" => seal = true,
+            "--seed-log" => seed_log = true,
+            "--max-rss-mb" => {
+                max_rss = Some(
+                    raw.next()
+                        .expect("RSS budget")
+                        .parse::<f64>()
+                        .expect("numeric RSS budget"),
+                )
+            }
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: rss_harness [N ...] [--dir PATH] [--progress] [--seal]\n\
+                    "usage: rss_harness [N ...] [--dir PATH] [--progress] [--seal] [--seed-log] [--max-rss-mb MB]\n\
                      \n\
                      Measure RSS after full replay at each claim count N.\n\
                      Multiple Ns ingest incrementally on one store (sorted ascending).\n\
@@ -169,6 +185,8 @@ fn parse_args() -> Args {
         dir,
         progress,
         seal,
+        seed_log,
+        max_rss,
     }
 }
 
@@ -225,6 +243,38 @@ fn ingest_upto(
         stats.terms,
         stats.interned_strings
     );
+}
+
+/// Seed validated claim events without running per-write similarity queries.
+/// This isolates replay/footprint capacity; it is NOT a write-throughput test.
+fn seed_log(path: &Path, from: usize, to: usize, actor: &Actor, scopes: &[Scope], rng: &mut Rng) {
+    use hivemind_core::{ClaimId, EVENT_VERSION, Event, EventBody, EventId, Timestamp};
+    use hivemind_engine::{codec, log::Log};
+    drop(Store::open(path, Options::default()).unwrap());
+    let (mut log, _) = Log::open(
+        &path.join("log"),
+        Durability::NoFsync,
+        hivemind_engine::log::DEFAULT_SEGMENT_BYTES,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    for i in from..to {
+        let data = claim(rng, &scopes[i % scopes.len()]);
+        data.validate().unwrap();
+        let event = Event {
+            v: EVENT_VERSION,
+            id: EventId::generate(),
+            recorded_at: Timestamp::now(),
+            actor: actor.clone(),
+            idempotency_key: None,
+            body: EventBody::ClaimAsserted {
+                claim: ClaimId::generate(),
+                supersedes: vec![],
+                data: Box::new(data),
+            },
+        };
+        log.append(&[codec::encode(&event).unwrap()]).unwrap();
+    }
 }
 
 fn measure_replay(path: &Path, n: usize, seal: bool) -> f64 {
@@ -292,7 +342,10 @@ fn main() {
         .collect::<Vec<_>>()
         .join(", ");
 
-    println!("hivemind RSS harness");
+    println!(
+        "hivemind RSS harness; seed-log={} (bypasses write similarity only)",
+        args.seed_log
+    );
     println!(
         "host: {} / {}",
         std::env::consts::OS,
@@ -332,13 +385,23 @@ fn main() {
     for &n in &args.ns {
         if have < n {
             println!("--- ingest to {n} ---");
-            ingest_upto(&path, have, n, &actor, &scopes, &mut rng, args.progress);
+            if args.seed_log {
+                seed_log(&path, have, n, &actor, &scopes, &mut rng);
+            } else {
+                ingest_upto(&path, have, n, &actor, &scopes, &mut rng, args.progress);
+            }
             have = n;
         } else if have > n {
             eprintln!("rss_harness: dir already has {have} claims (> N={n}); measuring as-is");
         }
         println!("--- measure N={n} ---");
         last_rss = measure_replay(&path, n, args.seal);
+        if let Some(budget) = args.max_rss {
+            assert!(
+                last_rss.is_finite() && last_rss <= budget,
+                "RSS {last_rss:.1} MiB exceeds capacity budget {budget:.1} MiB"
+            );
+        }
     }
 
     println!(

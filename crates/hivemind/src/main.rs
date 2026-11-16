@@ -120,6 +120,12 @@ enum Command {
 
 #[derive(Args, Debug)]
 struct ServeArgs {
+    /// JSON principal-to-tenant grants. Without a file, only the configured client can access the default tenant.
+    #[arg(long, env = "HIVEMIND_TENANT_ACCESS_PATH")]
+    tenant_access_path: Option<PathBuf>,
+    /// Enable admin-authenticated client registration (disabled by default).
+    #[arg(long, env = "HIVEMIND_ENABLE_DCR", default_value_t = false)]
+    enable_dcr: bool,
     /// Root directory holding `tenants/<id>/` partitions [default: ~/.hivemind].
     #[arg(long, env = "HIVEMIND_ROOT")]
     root: Option<PathBuf>,
@@ -571,8 +577,10 @@ fn run(cli: Cli) -> Result<()> {
             };
             let rt = tokio::runtime::Runtime::new()?;
             let require_tls = args.require_tls || env_flag_true("HIVEMIND_REQUIRE_TLS");
-            let disable_dcr = args.disable_dcr || env_flag_true("HIVEMIND_DISABLE_DCR");
+            let disable_dcr =
+                !args.enable_dcr || args.disable_dcr || env_flag_true("HIVEMIND_DISABLE_DCR");
             return rt.block_on(hivemind::http::serve(hivemind::http::ServeArgs {
+                tenant_access_path: args.tenant_access_path.clone(),
                 root,
                 listen,
                 token: args.token.clone(),

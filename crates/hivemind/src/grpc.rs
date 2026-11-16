@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tonic::{Request, Response, Status};
 use tracing::info;
 
+use crate::access::TenantAccess;
 use crate::embedder::EmbedderArgs;
 use crate::oauth::OAuthState;
 use crate::ratelimit::{self, RateClass, RateLimiter};
@@ -27,8 +28,11 @@ use pb::{
     ChangesSinceRequest, ChangesSinceResponse, HelloRequest, HelloResponse, RpcRequest, RpcResponse,
 };
 
+pub type SharedStores = Arc<Mutex<HashMap<String, Arc<Service>>>>;
+
 #[derive(Clone)]
 struct GrpcState {
+    access: TenantAccess,
     root: PathBuf,
     token: String,
     oauth: OAuthState,
@@ -48,6 +52,8 @@ impl std::fmt::Debug for GrpcState {
 
 #[derive(Clone, Debug)]
 pub struct GrpcArgs {
+    pub stores: Option<SharedStores>,
+    pub access: TenantAccess,
     pub root: PathBuf,
     pub listen: SocketAddr,
     pub token: String,
@@ -60,6 +66,7 @@ pub struct GrpcArgs {
 pub async fn serve(args: GrpcArgs) -> Result<()> {
     crate::obs::init_tracing();
     let state = GrpcState {
+        access: args.access,
         root: args.root.clone(),
         token: args.token,
         oauth: args.oauth,
@@ -69,7 +76,7 @@ pub async fn serve(args: GrpcArgs) -> Result<()> {
         } else {
             Durability::Fsync
         },
-        stores: Arc::new(Mutex::new(HashMap::new())),
+        stores: args.stores.unwrap_or_default(),
         embedder: args.embedder,
     };
     let svc = HivemindServer::new(state);
@@ -88,8 +95,9 @@ impl Hivemind for GrpcState {
         &self,
         request: Request<HelloRequest>,
     ) -> Result<Response<HelloResponse>, Status> {
-        let _identity = self.authorize(&request)?;
+        let identity = self.authorize(&request)?;
         let tenant = request.into_inner().tenant;
+        self.check_access(&identity, &tenant)?;
         let service = self.service_for(&tenant)?;
         let json =
             serde_json::to_string(&service.hello()).map_err(|e| Status::internal(e.to_string()))?;
@@ -99,6 +107,7 @@ impl Hivemind for GrpcState {
     async fn rpc(&self, request: Request<RpcRequest>) -> Result<Response<RpcResponse>, Status> {
         let identity = self.authorize(&request)?;
         let inner = request.into_inner();
+        self.check_access(&identity, &inner.tenant)?;
         let service = self.service_for(&inner.tenant)?;
         let params: Value = if inner.params_json.trim().is_empty() {
             json!({})
@@ -117,8 +126,9 @@ impl Hivemind for GrpcState {
         &self,
         request: Request<ChangesSinceRequest>,
     ) -> Result<Response<ChangesSinceResponse>, Status> {
-        let _identity = self.authorize(&request)?;
+        let identity = self.authorize(&request)?;
         let inner = request.into_inner();
+        self.check_access(&identity, &inner.tenant)?;
         let service = self.service_for(&inner.tenant)?;
         let limit = if inner.limit == 0 {
             100
@@ -137,6 +147,18 @@ impl Hivemind for GrpcState {
 }
 
 impl GrpcState {
+    fn check_access(
+        &self,
+        identity: &crate::oauth::AuthIdentity,
+        tenant: &str,
+    ) -> Result<(), Status> {
+        tenant::validate_tenant_id(tenant).map_err(|e| Status::invalid_argument(e.to_string()))?;
+        if !self.access.allows(identity, tenant) {
+            return Err(Status::permission_denied("tenant access denied"));
+        }
+        Ok(())
+    }
+
     fn authorize<T>(&self, request: &Request<T>) -> Result<crate::oauth::AuthIdentity, Status> {
         let header = request
             .metadata()
@@ -164,14 +186,14 @@ impl GrpcState {
 
     fn service_for(&self, tenant: &str) -> Result<Arc<Service>, Status> {
         tenant::validate_tenant_id(tenant).map_err(|e| Status::invalid_argument(e.to_string()))?;
-        {
-            let guard = self
-                .stores
-                .lock()
-                .map_err(|_| Status::internal("lock poisoned"))?;
-            if let Some(svc) = guard.get(tenant) {
-                return Ok(svc.clone());
-            }
+        // Hold the registry lock through open so concurrent first requests
+        // cannot race for the same store's exclusive filesystem lock.
+        let mut guard = self
+            .stores
+            .lock()
+            .map_err(|_| Status::internal("lock poisoned"))?;
+        if let Some(svc) = guard.get(tenant) {
+            return Ok(svc.clone());
         }
         let dir =
             ensure_tenant_dir(&self.root, tenant).map_err(|e| Status::internal(e.to_string()))?;
@@ -186,10 +208,7 @@ impl GrpcState {
             .apply(&store)
             .map_err(|e| Status::internal(e.to_string()))?;
         let service = Arc::new(Service::new(store));
-        let mut guard = self
-            .stores
-            .lock()
-            .map_err(|_| Status::internal("lock poisoned"))?;
-        Ok(guard.entry(tenant.to_owned()).or_insert(service).clone())
+        guard.insert(tenant.to_owned(), service.clone());
+        Ok(service)
     }
 }

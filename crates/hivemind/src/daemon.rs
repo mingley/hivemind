@@ -128,6 +128,9 @@ pub fn run(args: DaemonArgs) -> Result<()> {
 
 fn handle_client(stream: UnixStream, service: &Service) -> Result<()> {
     use std::io::{BufRead, BufReader};
+    // BSD/macOS may inherit O_NONBLOCK from the accepting listener. Each
+    // connection has its own blocking worker; WouldBlock must not close it.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(300)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     let mut reader = BufReader::new(stream.try_clone()?);

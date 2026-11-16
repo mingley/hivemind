@@ -87,14 +87,18 @@ tags in one store. Golden fixtures:
 | `HIVEMIND_REGISTER_RATE_PER_MINUTE` | Sustained `/oauth/register` rate per client IP (`0` disables) | `10` |
 | `HIVEMIND_RPC_RATE_PER_MINUTE` | Sustained authenticated HTTP/MCP/gRPC RPC rate per IP+principal (`0` disables) | `600` |
 | `HIVEMIND_REQUIRE_TLS` | `1`/`true`/`yes` — refuse start unless `PUBLIC_BASE` is `https://` | unset |
-| `HIVEMIND_DISABLE_DCR` | `1`/`true`/`yes`/`on` — disable open RFC 7591 `/oauth/register` | unset (DCR on) |
+| `HIVEMIND_ENABLE_DCR` | `true` enables admin-authenticated RFC 7591 registration | `false` |
+| `HIVEMIND_TENANT_ACCESS_PATH` | Server-owned tenant grants JSON, loaded at startup | configured client → default tenant only |
+| `HIVEMIND_MAX_CLAIMS` | Positive admission limit per store (includes audit tombstones) | `100000` |
+| `HIVEMIND_DISABLE_DCR` | `1`/`true`/`yes`/`on` — disable RFC 7591 `/oauth/register` | unset (DCR remains off unless explicitly enabled) |
 | `HIVEMIND_GRPC_LISTEN` | gRPC listen address | same host as HTTP, port `8788` |
 
 Flags: `--listen` (default `127.0.0.1:8787`), `--no-grpc`, `--token`,
 `--oauth-client-secret`, `--signing-key`, `--oauth-clients-path`,
 `--oauth-refresh-path`, `--access-token-ttl-secs`, `--refresh-token-ttl-secs`,
 `--token-rate-per-minute`, `--register-rate-per-minute`,
-`--rpc-rate-per-minute`, `--require-tls`, `--disable-dcr`, `--root`, plus the
+`--rpc-rate-per-minute`, `--require-tls`, `--enable-dcr`, `--disable-dcr`,
+`--tenant-access-path`, `--root`, plus the
 embedder flags below.
 
 **Rate limits:** in-process token buckets. Excess `/oauth/token`,
@@ -112,8 +116,9 @@ load from `HIVEMIND_OAUTH_REFRESH_PATH` (default
 atomically on issue/rotate so they survive process restart. See
 [SECURITY.md](../SECURITY.md).
 
-**Dynamic Client Registration (RFC 7591):** by default `POST /oauth/register`
-(open; rate-limited). Minimal JSON body: `redirect_uris`, `client_name`,
+**Dynamic Client Registration (RFC 7591):** disabled by default. Enable with
+`--enable-dcr` / `HIVEMIND_ENABLE_DCR=true`; registration then requires the
+bootstrap admin bearer and is rate-limited. Minimal JSON body: `redirect_uris`, `client_name`,
 `token_endpoint_auth_method` (`client_secret_basic` preferred, or `none` for
 public MCP clients), `grant_types` (default `authorization_code` +
 `refresh_token`). Response includes `client_id` and `client_secret` when
@@ -127,7 +132,7 @@ secrets — keep the data root private. The configured
 lock-down:** `--disable-dcr` or `HIVEMIND_DISABLE_DCR=1` makes
 `/oauth/register` return 404 and omits `registration_endpoint` (pre-configured
 client and any clients already on disk still work). `/oauth/authorize`
-auto-approves with no human login; token `sub` is the OAuth client_id — see
+requires bootstrap admin approval; token `sub` is the OAuth client_id — see
 [SECURITY.md](../SECURITY.md).
 
 **TLS:** `hivemind serve` speaks plaintext HTTP/gRPC. Production MUST terminate
@@ -188,7 +193,13 @@ attribution uses the token subject, not env TOFU. See
 
 ## Backup and sync
 
-**Segment backup** (durable log segments only):
+**Complete store backup** (log segments, MANIFEST, and every live artifact blob):
+
+Destinations must be absent or empty and outside the source store. Backup holds
+writers/erasure, validates artifact hashes, fsyncs a staging copy, then publishes
+it with a directory rename. A missing blob or I/O error fails the backup.
+OAuth registries and tenant grant configuration live outside tenant stores;
+back them up separately with restricted access if restoring the whole service.
 
 ```bash
 # single-store layout
@@ -208,11 +219,13 @@ curl -X POST -H "Authorization: Bearer $HIVEMIND_TOKEN" \
 offset received. `readyz` / `hivemind_log_offset` expose the server's next
 append offset for lag checks.
 
-Restore: stop writers, copy segments into an empty store directory (or restore
-the whole tenant dir), then open with `hivemind` / `serve`. Prefer offline
+Restore: stop writers, copy the **entire backup directory**, including `blobs/`
+and `MANIFEST`, into an empty tenant store directory, then open with
+`hivemind` / `serve` and run `hivemind verify`. Legacy segment-only backups do
+not recover artifact evidence; retain the original blobs separately. Prefer offline
 restore; live restore is not supported.
 
-HA is restore-from-segment-backup + this runbook (no multi-node failover).
+Single-node recovery is restore-from-complete-backup + this runbook (no multi-node failover).
 Durability release-gate coverage (kill-9, frame/codec properties, goldens) and
 the LazyFS power-loss gap: [f13-crash-injection.md](f13-crash-injection.md).
 
@@ -223,9 +236,9 @@ the LazyFS power-loss gap: [f13-crash-injection.md](f13-crash-injection.md).
   `cargo clippy --workspace --all-targets --locked -- -D warnings`,
   `cargo test --workspace --locked` on Ubuntu and macOS.
 - **Release packaging:** `.github/workflows/release.yml` — installs `protoc`,
-  then on `main` pushes, `v*` tags, and `workflow_dispatch` builds Linux
+  then on `main` pushes, `v*` tags, and `workflow_dispatch` first requires the reusable Ubuntu/macOS, capacity, and LazyFS gates, then builds Linux
   release binaries and uploads artifact `hivemind-linux-x86_64` (`hivemind`,
-  `hivemindd`, `SHA256SUMS`, and a `.tar.gz`). On `v*` tags the same tarball
+  `hivemindd`, `SHA256SUMS`, and a `.tar.gz`). On `v*` tags a nonempty `LICENSE` is required and the same tarball
   and `SHA256SUMS` are also attached to a GitHub Release.
 
 Local equivalent:
@@ -307,7 +320,7 @@ lifecycle table.
 
 1. Appends an audited `claim_forgotten` tombstone (`claim`, `reason`, actor,
    time, and any exclusively referenced blob hashes).
-2. Redacts the original `claim_asserted` log payload in place to a
+2. Redacts the original `claim_asserted` log payload by atomic segment replacement to a
    `[forgotten]` stub (statement, evidence, payload, and scope cleared).
 3. Removes the claim from lexical / vector projections and entity indexes.
    Forgotten claims are **never** returned by `recall`, including with
@@ -340,7 +353,7 @@ purge if a prior run was interrupted.
 | Guarantee | Bound |
 |---|---|
 | Online store (this process holds the lock) | Purge of log payload, projections, and exclusive blobs completes in the `forget` call before the receipt is returned. Target: **seconds** for a single claim on a laptop-sized store. |
-| After crash mid-forget | Tombstone may exist while payload redact/blob delete is incomplete. Re-run `forget` with the same claim id; purge is idempotent. |
+| After crash mid-forget | Startup resumes tombstoned erasures before accepting work; cleanup failure fails open. Retrying `forget` is idempotent. Cleanup errors are returned, never acknowledged as success. |
 | Cold backups / shipped segments | **Not covered** by online forget. Operators must expire or re-forget against restored copies under their backup retention policy. Document retention separately per deployment. |
 | Derived copies outside hivemind | Transcripts, agent context windows, and forks are out of band; this SLA covers the hivemind store directory only. |
 
@@ -369,3 +382,49 @@ see [README](../README.md#status-and-measurements) /
 above; backup retention remains an operator policy. Full residual-risk table:
 [README](../README.md#residual-risks).
 
+
+## Tenant grants and migration
+
+This release intentionally removes the previous any-bearer/any-tenant behavior.
+Without a policy, the configured OAuth client can only use the default tenant.
+For existing teams, create a server-owned file before upgrading:
+
+```json
+{"grants":{"hivemind-cli":["default","acme"],"dcr_example":["acme"]}}
+```
+
+Set `HIVEMIND_TENANT_ACCESS_PATH=/etc/hivemind/tenant-access.json`, restart,
+and keep the file writable only by operators. DCR clients need explicit grants.
+The `/mcp` route uses the default tenant; JSON/gRPC select authorized tenants.
+The bootstrap bearer alone can request server-path backups or approve OAuth
+client registrations/codes. Agents must not receive that admin credential.
+This is an admin approval API, not a browser login flow.
+
+## Supported capacity and measured envelope
+
+The default admission cap is **100,000 claims per store**, counting historical
+and forgotten rows. Existing data above the cap remains readable; new claim
+writes fail clearly. Idempotent retries continue to work at the cap. Set a
+positive `HIVEMIND_MAX_CLAIMS` to raise it after sizing the host.
+
+Linux/x86_64 release replay on 2026-11-16 (lexical-only, synthetic 20 scopes,
+seed `0x9E3779B97F4A7C15`, warm filesystem; KiB RSS from `ps` converted to MiB):
+
+| Claims | Replay | RSS |
+|---|---|---|
+| 10,000 | 0.24 s | 25.8 MiB |
+| 100,000 | 2.68 s | 209.1 MiB |
+| 1,000,000 | 23.76 s | 1,675.8 MiB |
+
+Reproduce with `cargo run --release --locked -p hivemind-engine --example
+rss_harness -- --seed-log --max-rss-mb 2560 10000 100000 1000000`.
+`--seed-log` validates/encodes claims directly into the log, bypassing ingest
+similarity search; these figures measure replay and footprint, **not write
+throughput, concurrency, or end-to-end latency**. Normal harness mode exercises
+`remember`. CI enforces a 512 MiB replay budget at 100k. Provision at least
+512 MiB per active store, plus request/backup/embedding overhead; opt-in 1M
+stores need at least 2.5 GiB per active store and tolerate ~24 s replay on this
+host. Many tenants multiply these requirements. Payload size and vocabulary
+can change memory use; this synthetic benchmark is not an absolute RSS bound.
+The original ≤50 MB laptop target remains unmet at 100k. Single-node operation
+and offline recovery remain the supported deployment model; no HA guarantee.

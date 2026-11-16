@@ -5,10 +5,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
 use rmcp::{
-    ErrorData as McpError, ServerHandler, ServiceExt,
+    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
     schemars::JsonSchema,
+    service::RequestContext,
     tool, tool_handler, tool_router,
     transport::io::stdio,
 };
@@ -186,7 +187,23 @@ impl HiveMcp {
         }
     }
 
-    fn call_daemon(&self, method: &str, params: Value) -> Result<Value, McpError> {
+    fn call_daemon(
+        &self,
+        method: &str,
+        params: Value,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Result<Value, McpError> {
+        let identity = ctx
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<crate::oauth::AuthIdentity>());
+        if self.forced_principal.is_some() && identity.is_none() {
+            return Err(McpError::internal_error(
+                "authenticated HTTP identity missing",
+                None,
+            ));
+        }
+        let principal = identity.map(|id| id.principal.as_str());
         match &self.backend {
             Backend::Daemon(client) => {
                 let mut guard = client
@@ -197,7 +214,7 @@ impl HiveMcp {
                     .map_err(|e| McpError::internal_error(format!("{e:#}"), None))
             }
             Backend::Local(service) => service
-                .dispatch_with_principal(method, params, self.forced_principal.as_deref())
+                .dispatch_with_principal(method, params, principal)
                 .map_err(|e| McpError::internal_error(format!("{e:#}"), None)),
         }
     }
@@ -210,6 +227,7 @@ impl HiveMcp {
     )]
     async fn remember(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(args): Parameters<RememberArgs>,
     ) -> Result<CallToolResult, McpError> {
         let params = json!({
@@ -222,7 +240,7 @@ impl HiveMcp {
             "supersedes": args.supersedes,
             "idempotency_key": args.idempotency_key,
         });
-        let result = self.call_daemon("remember", params)?;
+        let result = self.call_daemon("remember", params, &ctx)?;
         ok_json(result)
     }
 
@@ -233,6 +251,7 @@ impl HiveMcp {
     )]
     async fn recall(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(args): Parameters<RecallArgs>,
     ) -> Result<CallToolResult, McpError> {
         let params = json!({
@@ -247,7 +266,7 @@ impl HiveMcp {
             "budget": args.budget,
             "min_offset": args.min_offset,
         });
-        let result = self.call_daemon("recall", params)?;
+        let result = self.call_daemon("recall", params, &ctx)?;
         ok_json(result)
     }
 
@@ -258,6 +277,7 @@ impl HiveMcp {
     )]
     async fn show(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(args): Parameters<ShowArgs>,
     ) -> Result<CallToolResult, McpError> {
         let params = json!({
@@ -265,7 +285,7 @@ impl HiveMcp {
             "ctx": parse_pairs(&args.ctx)?,
             "min_offset": args.min_offset,
         });
-        let result = self.call_daemon("show", params)?;
+        let result = self.call_daemon("show", params, &ctx)?;
         ok_json(result)
     }
 
@@ -276,6 +296,7 @@ impl HiveMcp {
     )]
     async fn retract(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(args): Parameters<RetractArgs>,
     ) -> Result<CallToolResult, McpError> {
         let params = json!({
@@ -285,7 +306,7 @@ impl HiveMcp {
             "corrected_by": args.corrected_by,
             "idempotency_key": args.idempotency_key,
         });
-        let result = self.call_daemon("retract", params)?;
+        let result = self.call_daemon("retract", params, &ctx)?;
         ok_json(result)
     }
 
@@ -296,6 +317,7 @@ impl HiveMcp {
     )]
     async fn forget(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(args): Parameters<ForgetArgs>,
     ) -> Result<CallToolResult, McpError> {
         let params = json!({
@@ -303,7 +325,7 @@ impl HiveMcp {
             "reason": args.reason,
             "idempotency_key": args.idempotency_key,
         });
-        let result = self.call_daemon("forget", params)?;
+        let result = self.call_daemon("forget", params, &ctx)?;
         ok_json(result)
     }
 
@@ -314,6 +336,7 @@ impl HiveMcp {
     )]
     async fn feedback(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(args): Parameters<FeedbackArgs>,
     ) -> Result<CallToolResult, McpError> {
         let params = json!({
@@ -322,7 +345,7 @@ impl HiveMcp {
             "note": args.note,
             "idempotency_key": args.idempotency_key,
         });
-        let result = self.call_daemon("feedback", params)?;
+        let result = self.call_daemon("feedback", params, &ctx)?;
         ok_json(result)
     }
 
@@ -333,6 +356,7 @@ impl HiveMcp {
     )]
     async fn promote(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(args): Parameters<PromoteArgs>,
     ) -> Result<CallToolResult, McpError> {
         let params = json!({
@@ -340,7 +364,7 @@ impl HiveMcp {
             "scope": args.scope,
             "idempotency_key": args.idempotency_key,
         });
-        let result = self.call_daemon("promote", params)?;
+        let result = self.call_daemon("promote", params, &ctx)?;
         ok_json(result)
     }
 
@@ -351,6 +375,7 @@ impl HiveMcp {
     )]
     async fn changes_since(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(args): Parameters<ChangesSinceArgs>,
     ) -> Result<CallToolResult, McpError> {
         let mut filter = json!({});
@@ -368,7 +393,7 @@ impl HiveMcp {
             "limit": args.limit,
             "filter": filter,
         });
-        let result = self.call_daemon("changes_since", params)?;
+        let result = self.call_daemon("changes_since", params, &ctx)?;
         ok_json(result)
     }
 }

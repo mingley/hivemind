@@ -9,7 +9,14 @@ use serde_json::json;
 use tempfile::tempdir;
 
 fn test_args(root: std::path::PathBuf, addr: SocketAddr) -> ServeArgs {
+    let policy = root.join("tenant-access.json");
+    std::fs::write(
+        &policy,
+        r#"{"grants":{"hivemind-cli":["default","acme","payments","alpha","beta"]}}"#,
+    )
+    .unwrap();
     ServeArgs {
+        tenant_access_path: Some(policy),
         root,
         listen: addr,
         token: "bootstrap-token".into(),
@@ -648,6 +655,7 @@ async fn dcr_register_confidential_then_client_credentials_rpc() {
 
     let reg = client
         .post(format!("http://{addr}/oauth/register"))
+        .bearer_auth("bootstrap-token")
         .json(&json!({
             "client_name": "dcr-machine",
             "token_endpoint_auth_method": "client_secret_basic",
@@ -689,7 +697,11 @@ async fn dcr_register_confidential_then_client_credentials_rpc() {
         .send()
         .await
         .unwrap();
-    assert_eq!(hello.status(), 200, "{}", hello.text().await.unwrap());
+    assert_eq!(
+        hello.status(),
+        403,
+        "new clients must be explicitly granted tenant access"
+    );
 
     // Configured confidential client still works alongside DCR.
     let configured = oauth_access(&client, addr, "client-secret").await;
@@ -714,6 +726,7 @@ async fn dcr_register_public_authorize_token_refresh() {
     let redirect = "http://127.0.0.1/cb";
     let reg = client
         .post(format!("http://{addr}/oauth/register"))
+        .bearer_auth("bootstrap-token")
         .json(&json!({
             "redirect_uris": [redirect],
             "client_name": "dcr-mcp",
@@ -737,6 +750,7 @@ async fn dcr_register_public_authorize_token_refresh() {
         .unwrap();
     let authorize = no_redirect
         .get(format!("http://{addr}/oauth/authorize"))
+        .bearer_auth("bootstrap-token")
         .query(&[
             ("response_type", "code"),
             ("client_id", client_id.as_str()),
@@ -832,6 +846,7 @@ async fn dcr_persists_across_server_restart() {
 
     let reg = client
         .post(format!("http://{addr1}/oauth/register"))
+        .bearer_auth("bootstrap-token")
         .json(&json!({
             "client_name": "persist-across-restart",
             "token_endpoint_auth_method": "client_secret_basic",
@@ -858,6 +873,8 @@ async fn dcr_persists_across_server_restart() {
     let addr2 = listener.local_addr().unwrap();
     drop(listener);
     let args2 = test_args(root.path().to_path_buf(), addr2);
+    std::fs::write(args2.tenant_access_path.as_ref().unwrap(),
+        serde_json::to_vec(&json!({"grants": {"hivemind-cli": ["default", "acme"], client_id.clone(): ["default"]}})).unwrap()).unwrap();
     let serve2 = tokio::spawn(http::serve(args2));
     wait_for(addr2).await;
 
@@ -920,6 +937,7 @@ async fn refresh_persists_across_server_restart() {
         .unwrap();
     let authorize = no_redirect
         .get(format!("http://{addr1}/oauth/authorize"))
+        .bearer_auth("bootstrap-token")
         .query(&[
             ("response_type", "code"),
             ("client_id", "hivemind-cli"),
@@ -980,6 +998,8 @@ async fn refresh_persists_across_server_restart() {
     let addr2 = listener.local_addr().unwrap();
     drop(listener);
     let args2 = test_args(root.path().to_path_buf(), addr2);
+    std::fs::write(args2.tenant_access_path.as_ref().unwrap(),
+        serde_json::to_vec(&json!({"grants": {"hivemind-cli": ["default", "acme"], "hivemind-cli": ["default", "acme"]}})).unwrap()).unwrap();
     let serve2 = tokio::spawn(http::serve(args2));
     wait_for(addr2).await;
 
@@ -1065,6 +1085,7 @@ async fn disable_dcr_rejects_register_and_omits_metadata() {
 
     let reg = client
         .post(format!("http://{addr}/oauth/register"))
+        .bearer_auth("bootstrap-token")
         .json(&json!({
             "client_name": "should-fail",
             "token_endpoint_auth_method": "client_secret_basic",
@@ -1104,6 +1125,7 @@ async fn dcr_register_rate_limit_returns_429() {
     for _ in 0..5 {
         let resp = client
             .post(format!("http://{addr}/oauth/register"))
+            .bearer_auth("bootstrap-token")
             .json(&json!({
                 "client_name": "burst",
                 "token_endpoint_auth_method": "client_secret_basic",
@@ -1143,4 +1165,275 @@ async fn wait_for(addr: SocketAddr) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("server did not start on {addr}");
+}
+
+#[tokio::test]
+async fn defaults_deny_cross_tenant_and_admin_actions() {
+    let root = tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let mut args = test_args(root.path().to_path_buf(), addr);
+    args.tenant_access_path = None;
+    let serve = tokio::spawn(http::serve(args));
+    wait_for(addr).await;
+    let client = reqwest::Client::new();
+    let access = oauth_access(&client, addr, "client-secret").await;
+    let base = format!("http://{addr}");
+    assert_eq!(
+        client
+            .get(format!("{base}/v1/tenants/default/hello"))
+            .bearer_auth(&access)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    for suffix in ["hello", "changes"] {
+        assert_eq!(
+            client
+                .get(format!("{base}/v1/tenants/other/{suffix}"))
+                .bearer_auth(&access)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+    }
+    assert_eq!(client.post(format!("{base}/v1/tenants/other/rpc")).bearer_auth(&access).json(&json!({"method":"remember","params":{"statement":"unauthorized write","scope":"global"}})).send().await.unwrap().status(), 403);
+    assert!(!root.path().join("tenants/other").exists());
+    assert_eq!(
+        client
+            .post(format!("{base}/v1/tenants/default/backup"))
+            .bearer_auth(&access)
+            .json(&json!({"dest":root.path().join("backup")}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/oauth/register"))
+            .json(&json!({"grant_types":["client_credentials"]}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/oauth/register"))
+            .bearer_auth(&access)
+            .json(&json!({"grant_types":["client_credentials"]}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/oauth/authorize"))
+            .query(&[
+                ("response_type", "code"),
+                ("client_id", "hivemind-cli"),
+                ("redirect_uri", "https://untrusted.invalid/cb"),
+                ("code_challenge", "challenge")
+            ])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    let admin = client
+        .get(format!("{base}/v1/tenants/other/hello"))
+        .bearer_auth("bootstrap-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin.status(), 200);
+    let visible: serde_json::Value = client
+        .get(format!("{base}/v1/tenants"))
+        .bearer_auth(&access)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(visible["tenants"], json!(["default"]));
+    serve.abort();
+}
+
+fn mcp_result(body: &str) -> serde_json::Value {
+    serde_json::from_str(body).unwrap_or_else(|_| {
+        body.lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .unwrap_or_else(|| panic!("no MCP JSON response: {body}"))
+    })
+}
+
+#[tokio::test]
+async fn mcp_uses_request_identity_and_binds_sessions() {
+    let root = tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let args = test_args(root.path().to_path_buf(), addr);
+    let serve = tokio::spawn(http::serve(args));
+    wait_for(addr).await;
+    let client = reqwest::Client::new();
+    let access = oauth_access(&client, addr, "client-secret").await;
+    let url = format!("http://{addr}/mcp");
+    let init = client.post(&url).bearer_auth("bootstrap-token")
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"security-test","version":"1"}}}))
+        .send().await.unwrap();
+    assert!(init.status().is_success());
+    let session = init
+        .headers()
+        .get("mcp-session-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let _ = init.text().await.unwrap();
+    let notified = client
+        .post(&url)
+        .bearer_auth("bootstrap-token")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", &session)
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(notified.status().is_success());
+    let req = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"remember","arguments":{"statement":"MCP identity must match the bearer subject","scope":"project:security"}}});
+    let denied = client
+        .post(&url)
+        .bearer_auth(&access)
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", &session)
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        denied.status(),
+        403,
+        "another authenticated principal must not reuse a session"
+    );
+    let remembered = client
+        .post(&url)
+        .bearer_auth("bootstrap-token")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", &session)
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    assert!(remembered.status().is_success());
+    let result = mcp_result(&remembered.text().await.unwrap());
+    let text = result["result"]["content"][0]["text"].as_str().unwrap();
+    let receipt: serde_json::Value = serde_json::from_str(text).unwrap();
+    let detail: serde_json::Value = client
+        .post(format!("http://{addr}/v1/tenants/default/rpc"))
+        .bearer_auth("bootstrap-token")
+        .json(&json!({"method":"show","params":{"id":receipt["claim"]}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["author"]["principal"], "bootstrap");
+    serve.abort();
+}
+
+#[tokio::test]
+async fn http_and_grpc_share_store_and_enforce_same_grants() {
+    use hivemind::grpc::pb::{
+        ChangesSinceRequest, HelloRequest, RpcRequest, hivemind_client::HivemindClient,
+    };
+    use tonic::Request;
+    let root = tempdir().unwrap();
+    let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = http_listener.local_addr().unwrap();
+    let grpc_addr = grpc_listener.local_addr().unwrap();
+    drop((http_listener, grpc_listener));
+    let mut args = test_args(root.path().to_path_buf(), addr);
+    args.tenant_access_path = None;
+    args.grpc_listen = Some(grpc_addr);
+    let serve = tokio::spawn(http::serve(args));
+    wait_for(addr).await;
+    wait_for(grpc_addr).await;
+    let http = reqwest::Client::new();
+    let access = oauth_access(&http, addr, "client-secret").await;
+    let receipt: serde_json::Value = http.post(format!("http://{addr}/v1/tenants/default/rpc")).bearer_auth(&access).json(&json!({"method":"remember","params":{"statement":"shared across HTTP and gRPC","scope":"global"}})).send().await.unwrap().json().await.unwrap();
+    let mut grpc = HivemindClient::connect(format!("http://{grpc_addr}"))
+        .await
+        .unwrap();
+    fn authenticated<T>(value: T, token: &str) -> Request<T> {
+        let mut req = Request::new(value);
+        req.metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        req
+    }
+    let shown = grpc
+        .rpc(authenticated(
+            RpcRequest {
+                tenant: "default".into(),
+                method: "show".into(),
+                params_json: json!({"id":receipt["claim"]}).to_string(),
+            },
+            &access,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(shown.json.contains("shared across HTTP and gRPC"));
+    let denied = grpc
+        .hello(authenticated(
+            HelloRequest {
+                tenant: "other".into(),
+            },
+            &access,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+    let denied = grpc
+        .rpc(authenticated(
+            RpcRequest {
+                tenant: "other".into(),
+                method: "stats".into(),
+                params_json: "{}".into(),
+            },
+            &access,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+    let denied = grpc
+        .changes_since(authenticated(
+            ChangesSinceRequest {
+                tenant: "other".into(),
+                from: 0,
+                limit: 10,
+            },
+            &access,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+    assert!(!root.path().join("tenants/other").exists());
+    serve.abort();
 }

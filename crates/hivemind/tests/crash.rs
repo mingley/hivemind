@@ -16,7 +16,12 @@ fn acknowledged_writes_survive_kill_9() {
     let tmp = tempfile::tempdir().unwrap();
     let mut acked: BTreeMap<u64, String> = BTreeMap::new();
 
-    for round in 0..12u64 {
+    let rounds = std::env::var("HIVEMIND_CRASH_CYCLES")
+        .ok()
+        .map(|s| s.parse::<u64>().expect("positive crash cycle count"))
+        .unwrap_or(12);
+    assert!(rounds > 0);
+    for round in 0..rounds {
         let mut child = hivemind(tmp.path())
             .arg("debug-write-loop")
             .stdout(Stdio::piped())

@@ -117,6 +117,10 @@ fn two_clients_round_trip_and_lock_stays_exclusive() {
     assert_eq!(a.hello.protocol, protocol::PROTOCOL);
     assert_eq!(a.hello.store_id, b.hello.store_id);
 
+    // Leave the workers waiting on an empty socket. On macOS an accepted
+    // socket can inherit the listener's nonblocking flag and otherwise exit.
+    thread::sleep(Duration::from_millis(150));
+
     let remembered = a
         .call(
             "remember",

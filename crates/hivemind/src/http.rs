@@ -38,6 +38,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::info;
 
+use crate::access::TenantAccess;
 use crate::embedder::EmbedderArgs;
 use crate::mcp::HiveMcp;
 use crate::oauth::{
@@ -52,6 +53,7 @@ use crate::tenant::{self, ensure_tenant_dir, list_tenants};
 
 #[derive(Clone, Debug)]
 pub struct ServeArgs {
+    pub tenant_access_path: Option<PathBuf>,
     pub root: PathBuf,
     pub listen: SocketAddr,
     /// Bootstrap / admin bearer (not the OAuth client secret or signing key).
@@ -91,12 +93,14 @@ pub struct ServeArgs {
 }
 
 struct AppState {
+    mcp_sessions: Mutex<HashMap<String, String>>,
+    access: TenantAccess,
     root: PathBuf,
     token: String,
     durability: Durability,
     oauth: OAuthState,
     default_tenant: String,
-    stores: Mutex<HashMap<String, Arc<Service>>>,
+    stores: crate::grpc::SharedStores,
     limiter: Arc<RateLimiter>,
     embedder: EmbedderArgs,
 }
@@ -143,7 +147,14 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         rpc_per_minute: args.rpc_rate_per_minute,
     }));
 
+    let access = TenantAccess::load(
+        args.tenant_access_path.as_deref(),
+        &args.oauth_client_id,
+        &args.default_tenant,
+    )?;
     let state = Arc::new(AppState {
+        mcp_sessions: Mutex::new(HashMap::new()),
+        access: access.clone(),
         root: args.root.clone(),
         token: args.token.clone(),
         durability: if args.no_fsync {
@@ -153,7 +164,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         },
         oauth: oauth.clone(),
         default_tenant: args.default_tenant.clone(),
-        stores: Mutex::new(HashMap::new()),
+        stores: Arc::new(Mutex::new(HashMap::new())),
         limiter: limiter.clone(),
         embedder: args.embedder.clone(),
     });
@@ -162,9 +173,13 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     let default_service = state
         .service_for(&args.default_tenant)
         .map_err(|e| anyhow!(e.message))?;
-    // Streamable MCP cannot see per-request auth extensions; attribute writes
-    // to the pre-registered OAuth client_id (not env TOFU).
+    // The handler reads AuthIdentity from each HTTP request's SDK context;
+    // a shared handler refuses calls if that authenticated context is absent.
     let mcp_principal = args.oauth_client_id.clone();
+    let public_uri: axum::http::Uri = issuer.parse().context("invalid public base URI")?;
+    let public_authority = public_uri
+        .authority()
+        .context("public base requires a host")?;
     let mcp = StreamableHttpService::new(
         {
             let default_service = default_service.clone();
@@ -178,6 +193,8 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default().with_allowed_hosts([
+            public_authority.as_str().to_owned(),
+            public_authority.host().to_owned(),
             "localhost".to_owned(),
             "127.0.0.1".to_owned(),
             "::1".to_owned(),
@@ -234,6 +251,8 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
 
     if let Some(grpc_listen) = args.grpc_listen {
         let grpc_args = crate::grpc::GrpcArgs {
+            stores: Some(state.stores.clone()),
+            access,
             root: args.root.clone(),
             listen: grpc_listen,
             token: args.token.clone(),
@@ -333,8 +352,41 @@ async fn require_bearer(
     match sync::bearer_token(header) {
         Ok(token) => match state.oauth.authenticate(token, &state.token) {
             Ok(identity) => {
+                let path = request.uri().path();
+                if (path == "/mcp" || path.starts_with("/mcp/"))
+                    && !state.access.allows(&identity, &state.default_tenant)
+                {
+                    return (StatusCode::FORBIDDEN, "tenant access denied").into_response();
+                }
+                let is_mcp = path == "/mcp" || path.starts_with("/mcp/");
+                if is_mcp && let Some(session) = request.headers().get("mcp-session-id") {
+                    let sessions = state.mcp_sessions.lock().expect("MCP session lock");
+                    if session.to_str().ok().and_then(|id| sessions.get(id))
+                        != Some(&identity.principal)
+                    {
+                        return (
+                            StatusCode::FORBIDDEN,
+                            "MCP session belongs to another principal or has expired",
+                        )
+                            .into_response();
+                    }
+                }
+                let principal = identity.principal.clone();
                 request.extensions_mut().insert(identity);
-                next.run(request).await
+                let response = next.run(request).await;
+                if is_mcp
+                    && let Some(session) = response
+                        .headers()
+                        .get("mcp-session-id")
+                        .and_then(|s| s.to_str().ok())
+                {
+                    state
+                        .mcp_sessions
+                        .lock()
+                        .expect("MCP session lock")
+                        .insert(session.to_owned(), principal);
+                }
+                response
             }
             Err(e) => unauthorized(&state, e.to_string()),
         },
@@ -462,8 +514,15 @@ struct AuthorizeQuery {
 
 async fn oauth_authorize(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(q): Query<AuthorizeQuery>,
 ) -> Response {
+    if !is_admin(&state, &headers) {
+        return unauthorized(
+            &state,
+            "authorization requires bootstrap admin approval".into(),
+        );
+    }
     if q.response_type.as_deref() != Some("code") {
         return (
             StatusCode::BAD_REQUEST,
@@ -525,6 +584,7 @@ async fn oauth_token(
 
 async fn oauth_register(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<ClientRegistrationRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
@@ -535,12 +595,27 @@ async fn oauth_register(
             retry_after_secs: None,
         });
     }
+    if !is_admin(&state, &headers) {
+        return Err(ApiError::forbidden(
+            "client registration requires bootstrap admin",
+        ));
+    }
     let key = addr.ip().to_string();
     if let Err(limited) = state.limiter.check(RateClass::Register, &key) {
         return Err(ApiError::rate_limited(limited));
     }
     let value = state.oauth.register_client(&req).map_err(ApiError::from)?;
     Ok((StatusCode::CREATED, Json(value)))
+}
+
+fn is_admin(state: &AppState, headers: &HeaderMap) -> bool {
+    let header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+    sync::bearer_token(header)
+        .ok()
+        .and_then(|token| state.oauth.authenticate(token, &state.token).ok())
+        .is_some_and(|id| id.bootstrap)
 }
 
 fn urlencoding_minimal(s: &str) -> String {
@@ -551,15 +626,24 @@ fn urlencoding_minimal(s: &str) -> String {
         .replace(' ', "%20")
 }
 
-async fn tenants_list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let tenants = list_tenants(&state.root).map_err(ApiError::from)?;
+async fn tenants_list(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<AuthIdentity>,
+) -> Result<Json<Value>, ApiError> {
+    let tenants: Vec<_> = list_tenants(&state.root)
+        .map_err(ApiError::from)?
+        .into_iter()
+        .filter(|tenant| state.access.allows(&identity, tenant))
+        .collect();
     Ok(Json(json!({ "tenants": tenants })))
 }
 
 async fn tenant_hello(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<AuthIdentity>,
     AxumPath(tenant): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
+    state.check_access(&identity, &tenant)?;
     let service = state.service_for(&tenant)?;
     Ok(Json(
         serde_json::to_value(service.hello()).map_err(|e| ApiError::from(anyhow!(e)))?,
@@ -579,6 +663,7 @@ async fn tenant_rpc(
     AxumPath(tenant): AxumPath<String>,
     Json(body): Json<RpcBody>,
 ) -> Result<Json<Value>, ApiError> {
+    state.check_access(&identity, &tenant)?;
     let service = state.service_for(&tenant)?;
     let value = service
         .dispatch_with_principal(&body.method, body.params, Some(&identity.principal))
@@ -601,9 +686,11 @@ fn default_limit() -> usize {
 
 async fn tenant_changes(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<AuthIdentity>,
     AxumPath(tenant): AxumPath<String>,
     Query(q): Query<ChangesQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    state.check_access(&identity, &tenant)?;
     let service = state.service_for(&tenant)?;
     let value = service
         .dispatch("changes_since", json!({ "from": q.from, "limit": q.limit }))
@@ -618,9 +705,14 @@ struct BackupBody {
 
 async fn tenant_backup(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<AuthIdentity>,
     AxumPath(tenant): AxumPath<String>,
     Json(body): Json<BackupBody>,
 ) -> Result<Json<Value>, ApiError> {
+    if !identity.bootstrap {
+        return Err(ApiError::forbidden("backup requires bootstrap admin"));
+    }
+    state.check_access(&identity, &tenant)?;
     let service = state.service_for(&tenant)?;
     let report = service
         .store()
@@ -632,17 +724,22 @@ async fn tenant_backup(
 }
 
 impl AppState {
+    fn check_access(&self, identity: &AuthIdentity, tenant: &str) -> Result<(), ApiError> {
+        tenant::validate_tenant_id(tenant).map_err(ApiError::from)?;
+        if !self.access.allows(identity, tenant) {
+            return Err(ApiError::forbidden("tenant access denied"));
+        }
+        Ok(())
+    }
+
     fn service_for(&self, tenant: &str) -> Result<Arc<Service>, ApiError> {
         tenant::validate_tenant_id(tenant).map_err(ApiError::from)?;
-        {
-            let guard = self
-                .stores
-                .lock()
-                .map_err(|_| ApiError::from(anyhow!("lock poisoned")))?;
-            if let Some(svc) = guard.get(tenant) {
-                obs::set_log_offset(tenant, svc.store().next_offset());
-                return Ok(svc.clone());
-            }
+        let mut guard = self
+            .stores
+            .lock()
+            .map_err(|_| ApiError::from(anyhow!("stores lock poisoned")))?;
+        if let Some(svc) = guard.get(tenant) {
+            return Ok(svc.clone());
         }
         let dir = ensure_tenant_dir(&self.root, tenant).map_err(ApiError::from)?;
         let options = Options {
@@ -656,12 +753,7 @@ impl AppState {
             .apply(&store)
             .map_err(|e| ApiError::from(anyhow!(e)))?;
         let service = Arc::new(Service::new(store));
-        let mut guard = self
-            .stores
-            .lock()
-            .map_err(|_| ApiError::from(anyhow!("lock poisoned")))?;
-        let service = guard.entry(tenant.to_owned()).or_insert(service).clone();
-        obs::set_log_offset(tenant, service.store().next_offset());
+        guard.insert(tenant.to_owned(), service.clone());
         Ok(service)
     }
 
@@ -682,6 +774,14 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn forbidden(message: &str) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+            retry_after_secs: None,
+        }
+    }
+
     fn rate_limited(limited: RateLimited) -> Self {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,

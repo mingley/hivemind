@@ -330,14 +330,37 @@ impl Log {
             ));
         }
         let event_rel = (loc.event_pos - loc.record_pos) as usize;
+        if record[event_rel..event_rel + loc.event_len] == padded {
+            return Ok(());
+        }
         record[event_rel..event_rel + loc.event_len].copy_from_slice(&padded);
         let crc = record_crc(&record);
         record[4..8].copy_from_slice(&crc.to_le_bytes());
 
-        file.seek(SeekFrom::Start(loc.record_pos))?;
-        file.write_all(&record)?;
-        if self.durability == Durability::Fsync {
-            file.sync_data()?;
+        // Copy-on-write the whole segment: power loss must not leave an old
+        // acknowledged record with a new CRC and only part of its new payload.
+        let mut segment = fs::read(&path)?;
+        let start = loc.record_pos as usize;
+        segment[start..start + record.len()].copy_from_slice(&record);
+        if let Err(error) =
+            fsutil::write_atomic(&path, &segment, self.durability == Durability::Fsync)
+        {
+            self.poisoned = true; // rename may have succeeded before directory fsync failed
+            return Err(error.into());
+        }
+        if self.segments.last() == Some(&loc.segment_base) {
+            let reopened = (|| -> std::io::Result<File> {
+                let mut active = OpenOptions::new().read(true).write(true).open(&path)?;
+                active.seek(SeekFrom::Start(self.active_len))?;
+                Ok(active)
+            })();
+            match reopened {
+                Ok(active) => self.active = active,
+                Err(error) => {
+                    self.poisoned = true;
+                    return Err(error.into());
+                }
+            }
         }
         Ok(())
     }

@@ -10,7 +10,7 @@ and tokens**, with enough provenance that agents can verify what they
 retrieve. It runs as a lean local daemon on a laptop and is designed to grow
 into a shared service.
 
-> **Status (2026-11-12):** M0–M6 are built and tested (engine, daemon/MCP,
+> **Status (2026-11-16):** M0–M6 are built and tested (engine, daemon/MCP,
 > `hivebench`, citations/leases/import-export, hybrid retrieval, shared HTTP +
 > MCP Streamable HTTP + OAuth 2.1 + gRPC, tenant partitions, sync queue/cursor,
 > segment backup, projection snapshots, mmap lexical segments, LSH ANN,
@@ -20,9 +20,8 @@ into a shared service.
 > [docs/operations.md](docs/operations.md) and [SECURITY.md](SECURITY.md).
 > Local agents use `hivemind mcp` → `hivemindd`; remote/team use
 > `hivemind serve`. **Local MCP path proven for Claude Code** (MCP runs
-> outside its Bash sandbox): [docs/setup-mcp.md](docs/setup-mcp.md). This is
-> shared-memory software suitable for real multi-agent / team use on a single
-> node — **not** a claim of multi-node HA, legal certification, or closed
+> outside its Bash sandbox): [docs/setup-mcp.md](docs/setup-mcp.md). Tenant grants, admin-only OAuth approval/backup, complete restore, and erasure failure handling are enforced. This is
+> shared-memory software for bounded single-node team deployments — **not** a claim of multi-node HA, legal certification, or closed
 > outcome-eval science. See [Residual risks](#residual-risks).
 
 ## What makes it different
@@ -131,12 +130,12 @@ Honest gaps — none of these are presented as “fully production certified”:
 
 | Risk | Status |
 |---|---|
-| **Multi-node HA** | Explicit NON-goal. One node + restore from shipped segment backups ([operations.md](docs/operations.md)). No leader election / multi-region active-active. |
-| **IdP / DCR** | Shared OAuth 2.1 AS is in-process (PKCE + client_credentials + refresh_token + RFC 7591 DCR, short access TTL, separated secrets). DCR clients persist under `{HIVEMIND_ROOT}/oauth/dcr_clients.json`; refresh handles under `{HIVEMIND_ROOT}/oauth/refresh_tokens.json`. Open DCR can be locked down with `--disable-dcr` / `HIVEMIND_DISABLE_DCR=1`. External IdP federation is an explicit **NON-goal** (in-process AS only). |
-| **Footprint at 100k** | Post-mitigation RSS ~**219 MB** vs ≤ **50 MB** target (10k ~30 MB). Mid-scale harness/script landed; 1M-scale RSS/replay budgets still unproven. |
+| **Multi-node HA** | Explicit NON-goal. One node + restore from complete log/manifest/blob backups ([operations.md](docs/operations.md)). No leader election / multi-region active-active. |
+| **IdP / DCR** | Shared OAuth 2.1 AS is in-process (PKCE + client_credentials + refresh_token + RFC 7591 DCR, short access TTL, separated secrets). DCR clients persist under `{HIVEMIND_ROOT}/oauth/dcr_clients.json`; refresh handles under `{HIVEMIND_ROOT}/oauth/refresh_tokens.json`. DCR is disabled by default; enabling it still requires bootstrap admin registration/approval. Server-owned tenant grants deny cross-tenant access. External IdP federation is an explicit **NON-goal** (in-process AS only). |
+| **Capacity** | Default admission cap: 100k claims/store; measured replay RSS 209.1 MiB (512 MiB CI budget). Opt-in 1M: 1,675.8 MiB / 23.76 s replay. Original 50 MB laptop target remains unmet; see [capacity envelope](docs/operations.md#supported-capacity-and-measured-envelope). |
 | **Embeddings default** | **Lexical-only** remains the lean default (F4): no embedder required for remember/recall. Optional Model2Vec via `--features embeddings` + `--embedder model2vec` ([operations.md](docs/operations.md#embeddings-optional-lean-default-is-lexical-only)); hybrid ≥10% win not evidenced in-repo. |
 | **F1–F12 research** | Mechanisms for trust, citations, hybrid recall, etc. ship; outcome / attack-efficacy measurements (F1–F12) remain open research, not ship blockers. |
-| **LazyFS CI** | Frame goldens, property tests, and 12× `kill -9` run in CI; **LazyFS** power-loss injection is **not** wired into CI ([f13-crash-injection.md](docs/f13-crash-injection.md)). |
+| **Durability CI** | Frame goldens, property tests, 12× `kill -9`, and a pinned LazyFS drop-unsynced-data job gate CI/release packaging. The LazyFS test includes an unsynced negative control, acknowledged claims/blobs, erasure, and reopen verification ([F13](docs/f13-crash-injection.md)). |
 | **LICENSE** | Repository `LICENSE` file is **pending** owner choice (blocked before a tagged “production” release claim). |
 
 Threat model and secure defaults: [SECURITY.md](SECURITY.md). Operator runbook:

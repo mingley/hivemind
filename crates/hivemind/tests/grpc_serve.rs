@@ -34,6 +34,8 @@ async fn grpc_hello_and_rpc_with_bearer() {
     });
 
     let serve = tokio::spawn(grpc::serve(GrpcArgs {
+        stores: None,
+        access: hivemind::access::TenantAccess::load(None, "hivemind-cli", "default").unwrap(),
         root: root.path().to_path_buf(),
         listen: addr,
         token: token.clone(),
@@ -110,6 +112,8 @@ async fn grpc_rpc_rate_limit_resource_exhausted() {
     });
 
     let serve = tokio::spawn(grpc::serve(GrpcArgs {
+        stores: None,
+        access: hivemind::access::TenantAccess::load(None, "hivemind-cli", "default").unwrap(),
         root: root.path().to_path_buf(),
         listen: addr,
         token: token.clone(),

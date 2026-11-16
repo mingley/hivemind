@@ -8,6 +8,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -51,3 +52,37 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
         run: cargo test --workspace --locked
+      - name: Capacity budget (Linux; replay only)
+        if: runner.os == 'Linux'
+        run: cargo run --release --locked -p hivemind-engine --example rss_harness -- --seed-log --max-rss-mb 512 100000
+
+  power-loss:
+    name: power loss (LazyFS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install FUSE and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libfuse3-dev fuse3
+      - name: Build pinned LazyFS
+        run: |
+          git clone https://github.com/dsrhaslab/lazyfs.git "$RUNNER_TEMP/lazyfs"
+          git -C "$RUNNER_TEMP/lazyfs" checkout 3edad01aa936b81fed9bd64e47e725fc5ef6c977
+          cmake -S "$RUNNER_TEMP/lazyfs/libs/libpcache" -B "$RUNNER_TEMP/lazyfs/libs/libpcache/build"
+          cmake --build "$RUNNER_TEMP/lazyfs/libs/libpcache/build" -j 2
+          cmake -S "$RUNNER_TEMP/lazyfs/lazyfs" -B "$RUNNER_TEMP/lazyfs/lazyfs/build" -DLAZYFS_BUILD_TESTS=OFF
+          cmake --build "$RUNNER_TEMP/lazyfs/lazyfs/build" -j 2
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Drop unsynced data and verify acknowledged writes
+        env:
+          LAZYFS_SOURCE: ${{ runner.temp }}/lazyfs
+        run: ./scripts/power_loss.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lazyfs-test-log
+          path: lazyfs-test.log
+          if-no-files-found: ignore

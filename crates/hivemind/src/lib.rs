@@ -5,6 +5,7 @@
 //! - [`mcp`] is a stdio MCP shim that finds or starts the daemon
 //! - [`client`] talks to the daemon; [`service`] handles requests against a [`hivemind_engine::Store`]
 
+pub mod access;
 pub mod backend;
 pub mod client;
 pub mod daemon;

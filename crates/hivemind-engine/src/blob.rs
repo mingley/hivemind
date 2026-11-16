@@ -108,13 +108,23 @@ impl BlobStore {
             Ok(()) => {
                 if self.sync {
                     if let Some(shard) = path.parent() {
-                        let _ = fsutil::sync_dir(shard);
+                        fsutil::sync_dir(shard)?;
                     }
-                    let _ = fsutil::sync_dir(&self.root);
+                    fsutil::sync_dir(&self.root)?;
                 }
                 Ok(true)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Retry the metadata flush even after a prior remove succeeded
+                // but its fsync failed.
+                if self.sync {
+                    if let Some(shard) = path.parent().filter(|p| p.exists()) {
+                        fsutil::sync_dir(shard)?;
+                    }
+                    fsutil::sync_dir(&self.root)?;
+                }
+                Ok(false)
+            }
             Err(e) => Err(Error::Io(e)),
         }
     }

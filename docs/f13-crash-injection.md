@@ -28,27 +28,32 @@ crash with a live kernel page cache). It is a FUSE filesystem and needs:
 - Privileges / device access that GitHub-hosted `ubuntu-latest` does not
   reliably provide without a self-hosted or specially imaged runner
 
-**Status:** LazyFS is **not** wired into `.github/workflows/ci.yml`. This is
-an accepted residual risk for the first tagged release: process-crash and
-checksum/torn-tail coverage ship in CI; true power-loss injection does not.
+**Status:** `.github/workflows/ci.yml` now builds pinned LazyFS commit
+`3edad01aa936b81fed9bd64e47e725fc5ef6c977` and runs
+`scripts/power_loss.sh`. The reusable CI gates release packaging too.
+The test first proves that an unsynced negative-control file loses its data,
+then checks 20 cycles of acknowledged claims/artifact blobs, segment rolls,
+checkpoint + privacy erasure, cache loss, reopen and verify. CI fails if FUSE
+cannot mount or if the negative control does not lose data; it never silently
+skips this gate. Ordinary workspace tests mark only the mounted test ignored.
 
-## Remaining crash-injection work (post-tag / P1)
+Local execution requires a Linux host that permits FUSE mounts. The managed
+workspace used on 2026-11-16 refused mounts (`Operation not permitted`), so
+runtime validation of this job must come from GitHub Actions.
+LazyFS models lost **data cache**, not all possible hardware/filesystem
+metadata failures. This is stronger coverage, not a blanket power-loss proof.
 
-Track under F13 until closed; none of these silently change the on-disk
-format (see format freeze below).
+Erasure now atomically replaces a segment rather than overwriting a historical
+record in place. All writers, backup and checkpoint creation serialize with
+that operation. Startup resumes tombstoned incomplete erasures; blob and
+snapshot cleanup failures prevent success acknowledgements.
 
-1. **LazyFS on Linux CI** — self-hosted or containerized runner with FUSE;
-   script that mounts LazyFS, runs mixed writes, injects “crash” (drop cache),
-   reopens the store, asserts zero lost acks.
-2. **Higher `kill -9` volume** — F13 asks for ~1,000 cycles; CI keeps 12 for
-   runtime. Add a nightly / manual job that raises the loop count.
-3. **Simulated filesystem** — evaluate `turmoil-fs` (or an in-process fault
-   injector behind the file ops used by `log` / `blob`) for seeded crash
-   schedules and torn writes at 512 B / 4 KiB boundaries.
-4. **Disk-full and I/O-error injection beyond the unit-test hook** — extend
-   fault injection to blob create/rename and directory fsync failures.
-5. **ALICE-style / model-based store API tests** with crash/restart as an
-   operation (complements frame-level properties).
+## Extended process-crash testing
+
+`HIVEMIND_CRASH_CYCLES=1000 cargo test --locked -p hivemind --test crash`
+raises the default 12-cycle SIGKILL test for nightly/manual validation.
+Future work: broader I/O fault schedules and metadata-aware power-failure
+models; these do not replace the release gates above.
 
 ## Format freeze (first release tag)
 
