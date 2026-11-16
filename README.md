@@ -135,7 +135,7 @@ Honest gaps — none of these are presented as “fully production certified”:
 | **Capacity** | Default admission cap: 100k claims/store; measured replay RSS 209.1 MiB (512 MiB CI budget). Opt-in 1M: 1,675.8 MiB / 23.76 s replay. Original 50 MB laptop target remains unmet; see [capacity envelope](docs/operations.md#supported-capacity-and-measured-envelope). |
 | **Embeddings default** | **Lexical-only** remains the lean default (F4): no embedder required for remember/recall. Optional Model2Vec via `--features embeddings` + `--embedder model2vec` ([operations.md](docs/operations.md#embeddings-optional-lean-default-is-lexical-only)); hybrid ≥10% win not evidenced in-repo. |
 | **F1–F12 research** | Mechanisms for trust, citations, hybrid recall, etc. ship; outcome / attack-efficacy measurements (F1–F12) remain open research, not ship blockers. |
-| **Durability CI** | Frame goldens, property tests, 12× `kill -9`, and a pinned LazyFS drop-unsynced-data job gate CI/release packaging. The LazyFS test includes an unsynced negative control, acknowledged claims/blobs, erasure, and reopen verification ([F13](docs/f13-crash-injection.md)). |
+| **Durability CI** | Frame goldens, property tests, 12-cycle `kill -9` smoke plus a 1,000-cycle Linux soak, and a pinned LazyFS drop-unsynced-data job gate CI/release packaging. The LazyFS test includes an unsynced negative control, acknowledged claims/blobs, erasure, and reopen verification ([F13](docs/f13-crash-injection.md)). |
 | **LICENSE** | Repository `LICENSE` file is **pending** owner choice (blocked before a tagged “production” release claim). |
 
 Threat model and secure defaults: [SECURITY.md](SECURITY.md). Operator runbook:

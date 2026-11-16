@@ -55,6 +55,11 @@ jobs:
       - name: Capacity budget (Linux; replay only)
         if: runner.os == 'Linux'
         run: cargo run --release --locked -p hivemind-engine --example rss_harness -- --seed-log --max-rss-mb 512 100000
+      - name: 1,000-cycle crash soak (Linux)
+        if: runner.os == 'Linux'
+        env:
+          HIVEMIND_CRASH_CYCLES: 1000
+        run: cargo test --release --locked -p hivemind --test crash
 
   power-loss:
     name: power loss (LazyFS)

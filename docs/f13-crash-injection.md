@@ -52,8 +52,10 @@ snapshot cleanup failures prevent success acknowledgements.
 
 ## Extended process-crash testing
 
-`HIVEMIND_CRASH_CYCLES=1000 cargo test --locked -p hivemind --test crash`
-raises the default 12-cycle SIGKILL test for nightly/manual validation.
+`HIVEMIND_CRASH_CYCLES=1000 cargo test --release --locked -p hivemind --test crash`
+runs the extended SIGKILL soak; Linux CI and release gates now run this in
+addition to the default 12-cycle workspace test. The checker includes audited
+`recovered` events in offset continuity while comparing acknowledged claim ids.
 Future work: broader I/O fault schedules and metadata-aware power-failure
 models; these do not replace the release gates above.
 

@@ -60,11 +60,16 @@ fn acknowledged_writes_survive_kill_9() {
         String::from_utf8_lossy(&log.stderr)
     );
     let mut survived: BTreeMap<u64, String> = BTreeMap::new();
+    let mut offsets = Vec::new();
     for line in String::from_utf8(log.stdout).unwrap().lines() {
         let entry: serde_json::Value = serde_json::from_str(line).unwrap();
         let offset = entry["offset"].as_u64().unwrap();
-        let claim = entry["event"]["body"]["claim"].as_str().unwrap().to_owned();
-        survived.insert(offset, claim);
+        offsets.push(offset);
+        // A torn append may produce an audited `recovered` event at reopen.
+        // It participates in offset continuity but is not a claim assertion.
+        if let Some(claim) = entry["event"]["body"]["claim"].as_str() {
+            survived.insert(offset, claim.to_owned());
+        }
     }
     for (offset, claim) in &acked {
         assert_eq!(
@@ -73,7 +78,6 @@ fn acknowledged_writes_survive_kill_9() {
             "acknowledged write at offset {offset} was lost or replaced"
         );
     }
-    let offsets: Vec<u64> = survived.keys().copied().collect();
     assert_eq!(
         offsets,
         (0..offsets.len() as u64).collect::<Vec<_>>(),
