@@ -551,6 +551,9 @@ fn force_actor_principal(mut params: Value, principal: &str) -> Value {
         .map(|obj| obj.entry("actor").or_insert_with(|| json!({})));
     if let Some(Value::Object(map)) = actor {
         map.insert("principal".to_owned(), Value::String(principal.to_owned()));
+        // Shared credentials identify machine clients, never a verified human.
+        // An actor field supplied by the caller must not elevate trust.
+        map.insert("human".to_owned(), Value::Bool(false));
     } else if let Some(obj) = params.as_object_mut() {
         obj.insert("actor".to_owned(), json!({ "principal": principal }));
     }

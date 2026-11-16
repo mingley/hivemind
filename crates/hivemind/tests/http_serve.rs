@@ -224,7 +224,7 @@ async fn health_oauth_metadata_and_rpc() {
                 "statement": "hello from http",
                 "kind": "fact",
                 "scope": "project:acme/api",
-                "actor": { "principal": "spoofed-attacker" }
+                "actor": { "principal": "spoofed-attacker", "human": true }
             }
         }))
         .send()
@@ -258,6 +258,10 @@ async fn health_oauth_metadata_and_rpc() {
         "shared path must attribute from token sub, got {detail}"
     );
     assert_ne!(principal, "spoofed-attacker");
+    assert_eq!(
+        detail["author"]["kind"], "agent",
+        "OAuth clients cannot self-declare human trust"
+    );
 
     let metrics_after = client
         .get(format!("http://{addr}/metrics"))

@@ -72,7 +72,8 @@ reuse the bootstrap token as the client secret or signing key.
   `HIVEMIND_RPC_RATE_PER_MINUTE`). Excess → HTTP `429` / gRPC
   `RESOURCE_EXHAUSTED`. Ops probes are exempt. Set a knob to `0` to disable.
 - **Principal:** JSON RPC and gRPC overwrite `actor.principal` with the token
-  `sub` (or `bootstrap`). Streamable MCP attributes writes to the authenticated
+  `sub` (or `bootstrap`) and force machine/agent kind, ignoring caller-supplied
+  `human: true`. Streamable MCP attributes writes to the authenticated
   request token subject, and binds each transport session to its creating principal. Local stdio MCP still uses env TOFU.
 
 ## Tenants

@@ -39,7 +39,9 @@ skips this gate. Ordinary workspace tests mark only the mounted test ignored.
 
 Local execution requires a Linux host that permits FUSE mounts. The managed
 workspace used on 2026-11-16 refused mounts (`Operation not permitted`), so
-runtime validation of this job must come from GitHub Actions.
+runtime validation comes from GitHub Actions. The first run passed:
+[CI 43949501691](https://github.com/mingley/hivemind/actions/runs/43949501691),
+including the negative control and all 20 durable cycles.
 LazyFS models lost **data cache**, not all possible hardware/filesystem
 metadata failures. This is stronger coverage, not a blanket power-loss proof.
 
