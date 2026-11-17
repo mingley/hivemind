@@ -32,6 +32,8 @@ Daemon, `hivemind serve`, and gRPC all call the same tracing init.
 |---|---|---|
 | `HIVEMIND_DIR` | Store directory | `~/.hivemind/store` |
 | `HIVEMIND_IDLE_TIMEOUT` | Daemon idle exit seconds; `0` disables | `600` |
+| `HIVEMIND_MCP_HTTP` | Optional loopback Streamable HTTP `/mcp` + `/rpc` bind (e.g. `127.0.0.1:8787`) for SSH-tunneled dev environments | unset |
+| `HIVEMIND_MCP_HTTP_TOKEN_FILE` | `0600` bearer token file for `HIVEMIND_MCP_HTTP` | `<HIVEMIND_DIR>/mcp-http.token` |
 | `HIVEMIND_EVENT_CODEC` | Codec for **new** log appends: `json` / `1` (default) or `postcard` / `2` | `json` |
 | `HIVEMIND_PRINCIPAL` | Author principal on writes | `$USER` / `anonymous` |
 | `HIVEMIND_AGENT` | Agent name on writes | unset |

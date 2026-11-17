@@ -321,10 +321,9 @@ impl HiveMcp {
         mut params: Value,
         ctx: &RequestContext<RoleServer>,
     ) -> Result<Value, McpError> {
-        let identity = ctx
-            .extensions
-            .get::<axum::http::request::Parts>()
-            .and_then(|parts| parts.extensions.get::<crate::oauth::AuthIdentity>());
+        let http_parts = ctx.extensions.get::<axum::http::request::Parts>();
+        let identity =
+            http_parts.and_then(|parts| parts.extensions.get::<crate::oauth::AuthIdentity>());
         if self.forced_principal.is_some() && identity.is_none() {
             return Err(McpError::internal_error(
                 "authenticated HTTP identity missing",
@@ -332,6 +331,24 @@ impl HiveMcp {
             ));
         }
         let principal = identity.map(|id| id.principal.as_str());
+        if let Some(parts) = http_parts
+            && let Some(obj) = params.as_object_mut()
+        {
+            let header_agent = clean_header_value(&parts.headers, "x-hivemind-agent");
+            let header_session = clean_header_value(&parts.headers, "x-hivemind-session")
+                .or_else(|| clean_header_value(&parts.headers, "mcp-session-id"));
+            if header_agent.is_some() || header_session.is_some() {
+                let actor = obj.entry("actor").or_insert_with(|| json!({}));
+                if let Some(map) = actor.as_object_mut() {
+                    if let Some(agent) = header_agent {
+                        map.entry("agent").or_insert(Value::String(agent));
+                    }
+                    if let Some(session) = header_session {
+                        map.entry("session").or_insert(Value::String(session));
+                    }
+                }
+            }
+        }
         if self.forced_principal.is_none()
             && let Some(obj) = params.as_object_mut()
             && !obj.contains_key("actor")
@@ -573,6 +590,14 @@ fn parse_citations(items: &[String]) -> Result<Vec<Citation>, McpError> {
                 .map_err(|e| McpError::invalid_params(e.to_string(), None))
         })
         .collect()
+}
+
+fn clean_header_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(name)?.to_str().ok()?.trim();
+    if raw.is_empty() || raw.len() > 128 || raw.chars().any(char::is_control) {
+        return None;
+    }
+    Some(raw.to_owned())
 }
 
 /// Run the MCP stdio server: find or start the daemon, then serve tools.

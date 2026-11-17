@@ -465,3 +465,181 @@ fn cli_via_daemon_forwards_quotes_cites_and_here_context() {
     let bk: serde_json::Value = serde_json::from_slice(&bk_out.stdout).unwrap();
     assert!(bk["segments"].as_u64().unwrap() >= 1);
 }
+
+fn parse_sse_or_json(body: &str) -> serde_json::Value {
+    serde_json::from_str(body).unwrap_or_else(|_| {
+        body.lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .unwrap_or_else(|| panic!("no MCP JSON response in: {body}"))
+    })
+}
+
+#[tokio::test]
+async fn daemon_loopback_mcp_http_shares_store_with_unix_socket_and_rejects_non_loopback() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (daemon_bin, _cli_bin) = ensure_bins_built();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Non-loopback must fail closed immediately.
+    let bad = Command::new(daemon_bin)
+        .args(["--dir", dir.to_str().unwrap(), "--mcp-http", "0.0.0.0:9899"])
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("only accepts loopback"),
+        "{}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    let child = Command::new(daemon_bin)
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-fsync",
+            "--idle-timeout",
+            "30",
+            "--mcp-http",
+            &addr.to_string(),
+        ])
+        .env("HIVEMIND_PRINCIPAL", "mingley")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn hivemindd --mcp-http");
+    let mut guard = DaemonGuard {
+        child,
+        dir: dir.to_path_buf(),
+    };
+    guard.wait_ready(Duration::from_secs(5));
+
+    let token_path = dir.join(hivemind::daemon::DEFAULT_MCP_HTTP_TOKEN_FILE);
+    assert!(token_path.is_file());
+    let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "token file must be 0600");
+    let token = std::fs::read_to_string(&token_path)
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert!(token.len() >= 64);
+
+    let http = reqwest::Client::new();
+    let health = http
+        .get(format!("http://{addr}/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health.status(), 200);
+
+    // Unauthenticated /mcp must 401.
+    let unauth = http
+        .post(format!("http://{addr}/mcp"))
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"rdev","version":"1"}}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth.status(), 401);
+
+    // Streamable HTTP MCP initialize + remember with X-Hivemind-Agent header.
+    let mcp_url = format!("http://{addr}/mcp");
+    let init = http
+        .post(&mcp_url)
+        .bearer_auth(&token)
+        .header("accept", "application/json, text/event-stream")
+        .header("x-hivemind-agent", "copilot-rdev:caspian-common/ec-lab")
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"rdev","version":"1"}}}))
+        .send()
+        .await
+        .unwrap();
+    assert!(init.status().is_success());
+    let mcp_session = init
+        .headers()
+        .get("mcp-session-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let _ = init.text().await.unwrap();
+
+    let notified = http
+        .post(&mcp_url)
+        .bearer_auth(&token)
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", &mcp_session)
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(notified.status().is_success());
+
+    let remembered = http
+        .post(&mcp_url)
+        .bearer_auth(&token)
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", &mcp_session)
+        .header("x-hivemind-agent", "copilot-rdev:caspian-common/ec-lab")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "remember",
+                "arguments": {
+                    "statement": "RDev Copilot session shares MacBook hivemindd over loopback HTTP",
+                    "kind": "fact",
+                    "scope": "project:caspian-common"
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(remembered.status().is_success());
+    let rem_body = parse_sse_or_json(&remembered.text().await.unwrap());
+    let rem_receipt: serde_json::Value =
+        serde_json::from_str(rem_body["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let claim_id = rem_receipt["claim"].as_str().unwrap().to_owned();
+    let offset = rem_receipt["offset"].as_u64().unwrap();
+
+    // Local Unix-socket client immediately sees the RDev's write in the SAME store!
+    let mut unix_client = Client::connect(dir).expect("unix socket connect");
+    let shown = unix_client
+        .call("show", json!({ "id": claim_id, "min_offset": offset }))
+        .expect("unix show");
+    assert_eq!(shown["author"]["principal"], "mingley");
+    assert_eq!(
+        shown["author"]["agent"],
+        "copilot-rdev:caspian-common/ec-lab"
+    );
+    assert_eq!(shown["author"]["session"], mcp_session);
+
+    // Loopback /rpc also works for lightweight remote session hooks.
+    let rpc_rec: serde_json::Value = http
+        .post(format!("http://{addr}/rpc"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "id": 1,
+            "method": "recall",
+            "params": { "query": "MacBook hivemindd", "scopes": ["project:caspian-common"] }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(rpc_rec["ok"], true);
+    assert_eq!(rpc_rec["result"]["cards"][0]["id"], claim_id);
+
+    let _ = guard.child.kill();
+    let _ = guard.child.wait();
+}
