@@ -604,6 +604,22 @@ fn run(cli: Cli) -> Result<()> {
             }));
         }
         Command::Backup(args) => {
+            if args.tenant.is_none()
+                && let Ok(mut client) = hivemind::client::Client::connect(&dir)
+            {
+                let report = client.call("backup", serde_json::json!({ "dest": args.dest }))?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "backed up {} segments (next_offset {}) to {}",
+                        report["segments"],
+                        report["next_offset"],
+                        report["dest"].as_str().unwrap_or("?")
+                    );
+                }
+                return Ok(());
+            }
             let store_dir = if let Some(tenant) = &args.tenant {
                 let root = match &args.root {
                     Some(r) => r.clone(),
@@ -893,6 +909,44 @@ fn run_via_daemon(
             }
         }
         Command::Remember(args) => {
+            let mut evidence_artifacts = Vec::new();
+            for path in &args.evidence.files {
+                let bytes =
+                    fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+                let put_res = backend
+                    .call_daemon(
+                        "put",
+                        json!({
+                            "data_base64": base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &bytes,
+                            ),
+                            "name": name,
+                            "origin": Origin::ToolOutput,
+                            "actor": actor_params,
+                        }),
+                    )?
+                    .expect("daemon backend");
+                let hash: BlobHash = serde_json::from_value(put_res["hash"].clone())?;
+                evidence_artifacts.push(hash);
+            }
+            let mut citations = args.cites.clone();
+            if let Some(root) = args
+                .workspace
+                .as_ref()
+                .cloned()
+                .or_else(|| std::env::var_os("HIVEMIND_WORKSPACE").map(PathBuf::from))
+            {
+                for citation in &mut citations {
+                    if citation.content_hash.is_none() {
+                        citation.content_hash = Some(
+                            hivemind_core::hash_file_citation(&root, citation)
+                                .map_err(|e| anyhow!("hashing citation {citation}: {e}"))?,
+                        );
+                    }
+                }
+            }
             let params = json!({
                 "statement": args.statement,
                 "kind": args.kind,
@@ -900,6 +954,15 @@ fn run_via_daemon(
                 "about": args.about,
                 "when": args.when,
                 "fields": args.fields,
+                "origin": args.origin,
+                "method": args.method,
+                "evidence_artifacts": evidence_artifacts,
+                "evidence_urls": args.evidence.urls,
+                "quotes": args.evidence.quotes,
+                "cites": citations,
+                "derived_from": args.derived_from,
+                "valid_from": args.valid_from,
+                "review_by": args.review_by,
                 "supersedes": args.supersedes,
                 "idempotency_key": args.idempotency_key,
                 "actor": actor_params,
@@ -919,16 +982,18 @@ fn run_via_daemon(
             }
         }
         Command::Recall(args) => {
+            let ctx: Vec<(String, String)> = context(&args.context).into_iter().collect();
             let params = json!({
                 "query": args.query.join(" "),
                 "scopes": args.scopes,
                 "kinds": args.kinds,
                 "about": args.about,
-                "ctx": args.context.ctx,
+                "ctx": ctx,
                 "history": args.history,
                 "all_contexts": args.all_contexts,
                 "limit": args.limit,
                 "budget": args.budget,
+                "actor": actor_params,
             });
             let result = backend
                 .call_daemon("recall", params)?
@@ -937,9 +1002,12 @@ fn run_via_daemon(
             out.print_json(&result)
         }
         Command::Show(args) => {
+            let ctx: Vec<(String, String)> = context(&args.context).into_iter().collect();
             let params = json!({
                 "id": args.id,
-                "ctx": args.context.ctx,
+                "ctx": ctx,
+                "workspace": workspace_root(&args.context),
+                "actor": actor_params,
             });
             let result = backend
                 .call_daemon("show", params)?
@@ -1086,9 +1154,44 @@ fn run_via_daemon(
                 out.print_json(&result)
             }
         },
+        Command::Put(args) => {
+            let (bytes, default_name) = if args.file == Path::new("-") {
+                let mut bytes = Vec::new();
+                io::stdin().read_to_end(&mut bytes)?;
+                (bytes, None)
+            } else {
+                let bytes = fs::read(&args.file)
+                    .with_context(|| format!("reading {}", args.file.display()))?;
+                let name = args
+                    .file
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned());
+                (bytes, name)
+            };
+            let result = backend
+                .call_daemon(
+                    "put",
+                    json!({
+                        "data_base64": base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &bytes,
+                        ),
+                        "media_type": args.media_type,
+                        "name": args.name.clone().or(default_name),
+                        "origin": args.origin,
+                        "actor": actor_params,
+                    }),
+                )?
+                .expect("daemon backend");
+            if out.json {
+                out.print_json(&result)
+            } else {
+                println!("{}", result["hash"].as_str().unwrap_or("?"));
+                Ok(())
+            }
+        }
         Command::Import(_)
         | Command::Export(_)
-        | Command::Put(_)
         | Command::Cat { .. }
         | Command::Verify
         | Command::DebugWriteLoop { .. }

@@ -197,3 +197,271 @@ fn two_clients_round_trip_and_lock_stays_exclusive() {
         "expected Locked while daemon owns the store, got {locked:?}"
     );
 }
+
+#[test]
+fn shutdown_rpc_stops_daemon_and_cleans_socket() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let mut daemon = DaemonGuard::spawn(dir, 30);
+    let sock = protocol::socket_path(dir);
+    assert!(sock.exists());
+
+    let mut client = Client::connect(dir).expect("connect");
+    let resp = client.call("shutdown", json!({})).expect("shutdown");
+    assert_eq!(resp["stopping"], true);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            assert!(status.success(), "daemon exited with {status}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not exit after shutdown RPC"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        !sock.exists(),
+        "socket file should be removed on clean exit"
+    );
+}
+
+#[test]
+fn mcp_stdio_reconnects_after_daemon_restart_and_isolates_actors() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let (_daemon_bin, cli_bin) = ensure_bins_built();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Seed a stale socket file to verify connect_or_spawn recovers cleanly.
+    let run_dir = dir.join(protocol::RUN_DIR);
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(protocol::socket_path(dir), b"stale").unwrap();
+
+    let mut mcp = Command::new(cli_bin)
+        .args(["mcp", "--dir"])
+        .arg(dir)
+        .env("HIVEMIND_AGENT", "copilot-cli")
+        .env("HIVEMIND_PRINCIPAL", "alice")
+        .env("HIVEMIND_SESSION", "sess-mcp-1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn hivemind mcp");
+    let mut stdin = mcp.stdin.take().unwrap();
+    let mut stdout = BufReader::new(mcp.stdout.take().unwrap());
+
+    let send = |stdin: &mut std::process::ChildStdin, msg: serde_json::Value| {
+        let mut s = serde_json::to_string(&msg).unwrap();
+        s.push('\n');
+        stdin.write_all(s.as_bytes()).unwrap();
+        stdin.flush().unwrap();
+    };
+    let recv = |stdout: &mut BufReader<std::process::ChildStdout>| -> serde_json::Value {
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).expect("valid json-rpc response")
+    };
+
+    // MCP initialize handshake.
+    send(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+    let init = recv(&mut stdout);
+    assert!(init["result"]["serverInfo"]["name"].is_string(), "{init}");
+    send(
+        &mut stdin,
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    );
+
+    // 1. Write a claim with citation + quote via MCP.
+    send(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "remember",
+                "arguments": {
+                    "statement": "MCP reconnects seamlessly across daemon restarts",
+                    "kind": "fact",
+                    "scope": "project:acme/mcp",
+                    "cites": ["src/mcp.rs:1-10"],
+                    "quotes": ["daemon closed the connection"]
+                }
+            }
+        }),
+    );
+    let rem_resp = recv(&mut stdout);
+    let rem_text = rem_resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("remember json text");
+    let rem_val: serde_json::Value = serde_json::from_str(rem_text).unwrap();
+    let claim_id = rem_val["claim"].as_str().unwrap().to_owned();
+    let offset = rem_val["offset"].as_u64().unwrap();
+
+    // 2. Shut down the spawned daemon behind MCP's back!
+    let mut killer = Client::connect(dir).expect("connect to spawned daemon");
+    killer.call("shutdown", json!({})).expect("shutdown");
+    drop(killer);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while protocol::socket_path(dir).exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    // 3. Call recall via the SAME MCP session — must auto-respawn daemon & succeed!
+    send(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "recall",
+                "arguments": {
+                    "query": "reconnects seamlessly",
+                    "min_offset": offset
+                }
+            }
+        }),
+    );
+    let rec_resp = recv(&mut stdout);
+    assert_ne!(rec_resp["result"]["isError"], true, "{rec_resp}");
+    let rec_text = rec_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let rec_val: serde_json::Value = serde_json::from_str(rec_text).unwrap();
+    assert!(
+        rec_val["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == claim_id),
+        "recalled after daemon respawn: {rec_val}"
+    );
+
+    // 4. Verify actor principal/agent/session were forwarded (not daemon's env).
+    send(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "show",
+                "arguments": { "id": claim_id }
+            }
+        }),
+    );
+    let show_resp = recv(&mut stdout);
+    let show_val: serde_json::Value =
+        serde_json::from_str(show_resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(show_val["author"]["principal"], "alice");
+    assert_eq!(show_val["author"]["agent"], "copilot-cli");
+    assert_eq!(show_val["author"]["session"], "sess-mcp-1");
+    assert_eq!(show_val["provenance"]["citations"][0]["path"], "src/mcp.rs");
+
+    // Clean up both the MCP shim and the respawned daemon.
+    drop(stdin);
+    let _ = mcp.wait();
+    if let Ok(mut c) = Client::connect(dir) {
+        let _ = c.call("shutdown", json!({}));
+    }
+}
+
+#[test]
+fn cli_via_daemon_forwards_quotes_cites_and_here_context() {
+    let (_daemon_bin, cli_bin) = ensure_bins_built();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let _daemon = DaemonGuard::spawn(dir, 30);
+
+    let out = Command::new(cli_bin)
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--json",
+            "remember",
+            "CLI daemon path preserves quotes and conditions",
+            "--scope",
+            "project:acme/cli",
+            "--when",
+        ])
+        .arg(format!("os={}", std::env::consts::OS))
+        .args([
+            "--quote",
+            "exact error excerpt",
+            "--cite",
+            "src/main.rs:10-20",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rem: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = rem["claim"].as_str().unwrap();
+
+    let show_out = Command::new(cli_bin)
+        .args(["--dir", dir.to_str().unwrap(), "--json", "show", id])
+        .output()
+        .unwrap();
+    assert!(show_out.status.success());
+    let detail: serde_json::Value = serde_json::from_slice(&show_out.stdout).unwrap();
+    assert_eq!(detail["provenance"]["citations"][0]["path"], "src/main.rs");
+    assert_eq!(
+        detail["provenance"]["evidence"][0]["quote"],
+        "exact error excerpt"
+    );
+
+    let rec_out = Command::new(cli_bin)
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--json",
+            "recall",
+            "preserves quotes",
+            "--here",
+        ])
+        .output()
+        .unwrap();
+    assert!(rec_out.status.success());
+    let rec: serde_json::Value = serde_json::from_slice(&rec_out.stdout).unwrap();
+    assert_eq!(rec["cards"][0]["id"], id);
+    assert_eq!(rec["cards"][0]["applicability"]["state"], "match");
+
+    let backup_dir = tempfile::tempdir().unwrap();
+    let backup_target = backup_dir.path().join("snap");
+    let bk_out = Command::new(cli_bin)
+        .args([
+            "--dir",
+            dir.to_str().unwrap(),
+            "--json",
+            "backup",
+            backup_target.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        bk_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bk_out.stderr)
+    );
+    let bk: serde_json::Value = serde_json::from_slice(&bk_out.stdout).unwrap();
+    assert!(bk["segments"].as_u64().unwrap() >= 1);
+}

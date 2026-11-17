@@ -1,14 +1,17 @@
 //! Transport-independent handlers over a [`hivemind_engine::Store`].
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
+use base64::Engine as _;
 use hivemind_core::applicability::Context;
 use hivemind_core::{
-    Actor, ActorKind, ClaimData, ClaimId, ClaimKind, EdgeKind, EvidenceRef, Origin, Outcome,
-    RetractReason, Scope, Timestamp, consumption_taints_session, session_taint_key,
+    Actor, ActorKind, BlobHash, Citation, ClaimData, ClaimId, ClaimKind, EdgeKind, EvidenceRef,
+    Method, Origin, Outcome, RetractReason, Scope, Timestamp, consumption_taints_session,
+    session_taint_key,
 };
 use hivemind_engine::{ChangesFilter, Query, Store};
 use serde::Deserialize;
@@ -95,6 +98,7 @@ impl Service {
             "lease_release" => self.lease_release(params),
             "lease_show" => self.lease_show(params),
             "changes_since" => self.changes_since(params),
+            "put" => self.put(params),
             "stats" => Ok(serde_json::to_value(self.store.stats())?),
             other => Err(anyhow!("unknown method `{other}`")),
         }
@@ -152,6 +156,7 @@ impl Service {
     fn remember(&self, params: Value) -> Result<Value> {
         let p: RememberParams = serde_json::from_value(params)?;
         let actor = self.actor_from(&p.actor);
+        let now = Timestamp::now();
         let mut data = ClaimData::new(p.kind, p.statement, p.scope);
         data.about = p.about.unwrap_or_default();
         if let Some(when) = p.when {
@@ -162,6 +167,21 @@ impl Service {
                 data.payload.insert(k, Value::String(v));
             }
         }
+        data.valid_from = p
+            .valid_from
+            .as_deref()
+            .map(|t| Timestamp::parse_relative(t, now))
+            .transpose()?;
+        data.review_by = p
+            .review_by
+            .as_deref()
+            .map(|t| Timestamp::parse_relative(t, now))
+            .transpose()?;
+        if let Some(method) = p.method {
+            data.provenance.method = method;
+        } else if actor.kind == ActorKind::Human {
+            data.provenance.method = Method::Human;
+        }
         if let Some(origin) = p.origin {
             data.provenance.origin = origin;
         }
@@ -171,10 +191,26 @@ impl Service {
         if self.session_is_tainted(&actor) {
             data.provenance.origin = Origin::External;
         }
+        if let Some(hashes) = p.evidence_artifacts {
+            for hash in hashes {
+                data.provenance.evidence.push(EvidenceRef::Artifact(hash));
+            }
+        }
         if let Some(urls) = p.evidence_urls {
             for url in urls {
                 data.provenance.evidence.push(EvidenceRef::Url(url));
             }
+        }
+        if let Some(quotes) = p.quotes {
+            for quote in quotes {
+                data.provenance.evidence.push(EvidenceRef::Quote(quote));
+            }
+        }
+        if let Some(cites) = p.cites {
+            data.provenance.citations = cites;
+        }
+        if let Some(derived_from) = p.derived_from {
+            data.provenance.derived_from = resolve_many(&self.store, &derived_from)?;
         }
         let mut req = hivemind_engine::Remember::new(data);
         if let Some(ids) = p.supersedes {
@@ -220,15 +256,31 @@ impl Service {
         let actor = self.actor_from(&p.actor);
         self.wait_if_needed(p.min_offset)?;
         let id = self.store.resolve(&p.id)?;
-        let ctx = p.ctx.map(ctx_map);
+        let ctx = p.ctx.map(ctx_map).filter(|c| !c.is_empty());
         let detail = self
             .store
-            .get(&id, ctx.as_ref())
+            .get_with_workspace(&id, ctx.as_ref(), p.workspace.as_deref())
             .ok_or_else(|| anyhow!("claim {id} missing after resolve"))?;
         if consumption_taints_session(detail.belief.trust, detail.tainted) {
             self.mark_session_tainted(&actor);
         }
         Ok(serde_json::to_value(detail)?)
+    }
+
+    fn put(&self, params: Value) -> Result<Value> {
+        let p: PutParams = serde_json::from_value(params)?;
+        let actor = self.actor_from(&p.actor);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(p.data_base64.as_bytes())
+            .context("decode base64 artifact payload")?;
+        let (hash, receipt) = self.store.put_artifact(
+            &actor,
+            &bytes,
+            p.media_type,
+            p.name,
+            p.origin.unwrap_or(Origin::ToolOutput),
+        )?;
+        Ok(json!({ "hash": hash, "receipt": receipt }))
     }
 
     fn retract(&self, params: Value) -> Result<Value> {
@@ -407,8 +459,18 @@ struct RememberParams {
     supersedes: Option<Vec<String>>,
     /// Content origin; `external` marks the claim untrusted (scenario 10).
     origin: Option<Origin>,
+    method: Option<Method>,
+    /// Optional artifact hashes (from `put`) cited as evidence.
+    evidence_artifacts: Option<Vec<BlobHash>>,
     /// Optional URL evidence pointers (for example issue comments).
     evidence_urls: Option<Vec<String>>,
+    /// Optional verbatim evidence quotes.
+    quotes: Option<Vec<String>>,
+    /// Optional code citations.
+    cites: Option<Vec<Citation>>,
+    derived_from: Option<Vec<String>>,
+    valid_from: Option<String>,
+    review_by: Option<String>,
     idempotency_key: Option<String>,
     #[serde(default)]
     actor: ActorParams,
@@ -439,8 +501,19 @@ struct RecallParams {
 struct ShowParams {
     id: String,
     ctx: Option<Vec<(String, String)>>,
+    workspace: Option<PathBuf>,
     min_offset: Option<u64>,
     /// Used for session-taint keying when this show returns untrusted content.
+    #[serde(default)]
+    actor: ActorParams,
+}
+
+#[derive(Debug, Deserialize)]
+struct PutParams {
+    data_base64: String,
+    media_type: Option<String>,
+    name: Option<String>,
+    origin: Option<Origin>,
     #[serde(default)]
     actor: ActorParams,
 }
