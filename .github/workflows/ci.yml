@@ -75,7 +75,9 @@ jobs:
         run: |
           git clone https://github.com/dsrhaslab/lazyfs.git "$RUNNER_TEMP/lazyfs"
           git -C "$RUNNER_TEMP/lazyfs" checkout 3edad01aa936b81fed9bd64e47e725fc5ef6c977
-          cmake -S "$RUNNER_TEMP/lazyfs/libs/libpcache" -B "$RUNNER_TEMP/lazyfs/libs/libpcache/build"
+          # The pinned toml11 dependency declares a policy version CMake 4 removed.
+          cmake -S "$RUNNER_TEMP/lazyfs/libs/libpcache" -B "$RUNNER_TEMP/lazyfs/libs/libpcache/build" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
           cmake --build "$RUNNER_TEMP/lazyfs/libs/libpcache/build" -j 2
           cmake -S "$RUNNER_TEMP/lazyfs/lazyfs" -B "$RUNNER_TEMP/lazyfs/lazyfs/build" -DLAZYFS_BUILD_TESTS=OFF
           cmake --build "$RUNNER_TEMP/lazyfs/lazyfs/build" -j 2
