@@ -66,6 +66,30 @@ fn wait_for_offset_times_out_when_cursor_is_ahead() {
 }
 
 #[test]
+fn waiting_reader_observes_the_new_event_after_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path(), options()).unwrap();
+    let target = store.next_offset();
+    std::thread::scope(|threads| {
+        let reader = threads.spawn(|| {
+            store
+                .wait_for_offset(target, Duration::from_secs(2))
+                .unwrap();
+            store.events(target, 1).unwrap().pop().unwrap()
+        });
+        let (offset, id) = remember(
+            &store,
+            ClaimKind::Fact,
+            "next committed event",
+            scope("project:acme/wait"),
+        );
+        let (read_offset, event) = reader.join().unwrap();
+        assert_eq!(read_offset, offset);
+        assert_eq!(event.body.claim(), Some(id));
+    });
+}
+
+#[test]
 fn changes_since_filters_by_scope_and_claim() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path(), options()).unwrap();
@@ -148,4 +172,17 @@ fn changes_since_filters_by_scope_and_claim() {
         .unwrap();
     assert_eq!(decisions.len(), 1);
     assert_eq!(decisions[0].1.body.claim(), Some(web_id));
+
+    let last_api = store
+        .changes_since(
+            one_claim[0].0,
+            1,
+            &ChangesFilter {
+                scopes: Some(vec![scope("project:acme/api")]),
+                ..ChangesFilter::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(last_api.len(), 1);
+    assert_eq!(last_api[0].0, one_claim[0].0 + 1);
 }

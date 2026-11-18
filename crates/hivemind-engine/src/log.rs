@@ -319,7 +319,7 @@ impl Log {
         }
     }
 
-    /// Overwrite one acknowledged event's bytes in place (erasure).
+    /// Replace one acknowledged event's payload without changing record boundaries (erasure).
     ///
     /// `new_bytes` must be no longer than the original encoding; shorter
     /// payloads are padded with ASCII spaces so the surrounding record layout
@@ -332,7 +332,7 @@ impl Log {
         if offset >= self.next_offset {
             return Err(Error::NotFound(format!("event offset {offset}")));
         }
-        let loc = find_event_location(&self.dir, &self.segments, offset)?;
+        let loc = find_event_location(&self.dir, &self.segments, &self.anchors, offset)?;
         if new_bytes.len() > loc.event_len {
             return Err(Error::Invalid(format!(
                 "redacted event at offset {offset} is {} bytes; original was {} (erasure stubs must shrink or stay the same size)",
@@ -403,33 +403,37 @@ struct EventLocation {
     event_len: usize,
 }
 
-fn find_event_location(dir: &Path, segments: &[u64], target: u64) -> Result<EventLocation> {
-    let start = segments
+fn find_event_location(
+    dir: &Path,
+    segments: &[u64],
+    anchors: &RwLock<Vec<SeekAnchor>>,
+    target: u64,
+) -> Result<EventLocation> {
+    let idx = segments
         .partition_point(|base| *base <= target)
         .saturating_sub(1);
-    for &base in &segments[start..] {
-        let path = segment_path(dir, base);
-        let mut reader = SegmentReader::open(&path, base)?;
-        loop {
-            let record_pos = reader.pos;
-            match reader.step()? {
-                Step::Record => {
-                    for &(offset, start, end) in &reader.events {
-                        if offset == target {
-                            return Ok(EventLocation {
-                                segment_base: base,
-                                record_pos,
-                                record_len: reader.record.len(),
-                                event_pos: record_pos + start as u64,
-                                event_len: end - start,
-                            });
-                        }
+    let base = segments[idx];
+    let path = segment_path(dir, base);
+    let mut reader = SegmentReader::open_at(&path, base, target, anchors)?;
+    loop {
+        let record_pos = reader.pos;
+        match reader.step()? {
+            Step::Record => {
+                for &(offset, start, end) in &reader.events {
+                    if offset == target {
+                        return Ok(EventLocation {
+                            segment_base: base,
+                            record_pos,
+                            record_len: (reader.pos - record_pos) as usize,
+                            event_pos: record_pos + start as u64,
+                            event_len: end - start,
+                        });
                     }
                 }
-                Step::End => break,
-                Step::Bad { position, reason } => {
-                    return Err(Error::corruption(path, position, reason));
-                }
+            }
+            Step::End => break,
+            Step::Bad { position, reason } => {
+                return Err(Error::corruption(path, position, reason));
             }
         }
     }
@@ -475,21 +479,8 @@ impl LogView {
             .partition_point(|base| *base <= from)
             .saturating_sub(1);
         for &base in &self.segments[start..] {
-            let mut reader = SegmentReader::open(&segment_path(&self.dir, base), base)?;
-            if base <= from {
-                let anchors = self.anchors.read();
-                let at = anchors
-                    .partition_point(|anchor| anchor.0 <= from)
-                    .saturating_sub(1);
-                if let Some(&(offset, anchor_base, pos)) = anchors.get(at)
-                    && anchor_base == base
-                    && pos > SEGMENT_HEADER_LEN
-                {
-                    reader.reader.seek(SeekFrom::Start(pos))?;
-                    reader.pos = pos;
-                    reader.next_offset = offset;
-                }
-            }
+            let path = segment_path(&self.dir, base);
+            let mut reader = SegmentReader::open_at(&path, base, from, &self.anchors)?;
             loop {
                 match reader.step()? {
                     Step::Record => {
@@ -508,11 +499,7 @@ impl LogView {
                             // Past the acknowledged end: an append in progress.
                             return Ok(());
                         }
-                        return Err(Error::corruption(
-                            segment_path(&self.dir, base),
-                            position,
-                            reason,
-                        ));
+                        return Err(Error::corruption(path, position, reason));
                     }
                 }
             }
@@ -614,12 +601,25 @@ pub type DecodedRecord = (usize, Vec<(u64, Vec<u8>)>);
 /// Validates a commit record that starts at `bytes[0]` and returns how many
 /// bytes it consumes plus each `(offset, event)` pair.
 ///
-/// Used by recovery and by property/fuzz tests so the on-disk layout stays
-/// covered without going through the filesystem.
+/// Uses the same frame parser as recovery, and returns an owned copy of each event.
 pub fn try_decode_record(
     expected_first: u64,
     bytes: &[u8],
 ) -> std::result::Result<DecodedRecord, FrameError> {
+    let mut events = Vec::new();
+    let consumed = parse_record(expected_first, bytes, |offset, start, end| {
+        events.push((offset, bytes[start..end].to_vec()));
+    })?;
+    Ok((consumed, events))
+}
+
+/// Validate a frame and collect event positions without copying payload bytes.
+/// Discard any collected positions if the frame fails validation.
+fn parse_record(
+    expected_first: u64,
+    bytes: &[u8],
+    mut visit: impl FnMut(u64, usize, usize),
+) -> std::result::Result<usize, FrameError> {
     if bytes.len() < RECORD_HEADER_LEN as usize {
         return Err(FrameError::TruncatedHeader);
     }
@@ -647,7 +647,9 @@ pub fn try_decode_record(
     if count == 0 {
         return Err(FrameError::EmptyBatch);
     }
-    let mut events = Vec::with_capacity(count as usize);
+    if count > len / 4 || first.checked_add(u64::from(count) - 1).is_none() {
+        return Err(FrameError::MalformedPayload);
+    }
     let mut at = RECORD_HEADER_LEN as usize;
     for i in 0..u64::from(count) {
         if at + 4 > record.len() {
@@ -655,17 +657,17 @@ pub fn try_decode_record(
         }
         let event_len = u32_at(record, at) as usize;
         let start = at + 4;
-        let end = start + event_len;
-        if end > record.len() {
+        if event_len > record.len() - start {
             return Err(FrameError::MalformedPayload);
         }
-        events.push((first + i, record[start..end].to_vec()));
+        let end = start + event_len;
+        visit(first + i, start, end);
         at = end;
     }
     if at != record.len() {
         return Err(FrameError::MalformedPayload);
     }
-    Ok((total, events))
+    Ok(total)
 }
 
 /// Creates an empty segment atomically, so a segment file either exists with a
@@ -718,6 +720,7 @@ struct SegmentReader {
     pos: u64,
     /// Offset of the next event.
     next_offset: u64,
+    /// Scratch buffer large enough for the largest record read so far.
     record: Vec<u8>,
     /// `(offset, start, end)` of each event of the current record, in `record`.
     events: Vec<(u64, usize, usize)>,
@@ -767,6 +770,39 @@ impl SegmentReader {
         })
     }
 
+    fn open_at(
+        path: &Path,
+        base: u64,
+        from: u64,
+        anchors: &RwLock<Vec<SeekAnchor>>,
+    ) -> Result<Self> {
+        let mut reader = Self::open(path, base)?;
+        if from <= base {
+            return Ok(reader);
+        }
+        let anchor = {
+            let anchors = anchors.read();
+            let at = anchors.partition_point(|anchor| anchor.0 <= from);
+            at.checked_sub(1).map(|index| anchors[index])
+        };
+        if let Some((offset, anchor_base, pos)) = anchor
+            && anchor_base == base
+            && pos > SEGMENT_HEADER_LEN
+        {
+            if pos >= reader.file_len {
+                return Err(Error::corruption(
+                    path,
+                    pos,
+                    "seek anchor beyond segment end",
+                ));
+            }
+            reader.reader.seek(SeekFrom::Start(pos))?;
+            reader.pos = pos;
+            reader.next_offset = offset;
+        }
+        Ok(reader)
+    }
+
     fn bad(&self, reason: impl Into<String>) -> Result<Step> {
         Ok(Step::Bad {
             position: self.pos,
@@ -784,8 +820,11 @@ impl SegmentReader {
             return self.bad(FrameError::TruncatedHeader.to_string());
         }
         // Peek the length so we know how many bytes to pull before validating.
-        self.record.resize(RECORD_HEADER_LEN as usize, 0);
-        self.reader.read_exact(&mut self.record)?;
+        let header_len = RECORD_HEADER_LEN as usize;
+        if self.record.len() < header_len {
+            self.record.resize(header_len, 0);
+        }
+        self.reader.read_exact(&mut self.record[..header_len])?;
         let len = u32_at(&self.record, 0);
         if len > MAX_RECORD_LEN {
             return self.bad(FrameError::LengthExceedsLimit(len).to_string());
@@ -793,30 +832,25 @@ impl SegmentReader {
         if remaining - RECORD_HEADER_LEN < u64::from(len) {
             return self.bad(FrameError::TruncatedPayload.to_string());
         }
-        self.record
-            .resize(RECORD_HEADER_LEN as usize + len as usize, 0);
-        self.reader
-            .read_exact(&mut self.record[RECORD_HEADER_LEN as usize..])?;
-        match try_decode_record(self.next_offset, &self.record) {
-            Ok((consumed, decoded)) => {
-                debug_assert_eq!(consumed, self.record.len());
-                // Keep event bytes borrowed from `self.record` for zero-copy scan.
-                let mut at = RECORD_HEADER_LEN as usize;
-                for (offset, event) in &decoded {
-                    let start = at + 4;
-                    let end = start + event.len();
-                    debug_assert_eq!(&self.record[start..end], event.as_slice());
-                    self.events.push((*offset, start, end));
-                    at = end;
-                }
-                let first = decoded[0].0;
-                let count = decoded.len() as u64;
-                self.pos += consumed as u64;
-                self.next_offset = first + count;
-                Ok(Step::Record)
-            }
-            Err(err) => self.bad(err.to_string()),
+        let record_len = header_len + len as usize;
+        if self.record.len() < record_len {
+            self.record.resize(record_len, 0);
         }
+        let record = &mut self.record[..record_len];
+        self.reader.read_exact(&mut record[header_len..])?;
+        if let Err(err) = parse_record(self.next_offset, record, |offset, start, end| {
+            self.events.push((offset, start, end));
+        }) {
+            self.events.clear();
+            return self.bad(err.to_string());
+        }
+        let Some(next_offset) = self.next_offset.checked_add(self.events.len() as u64) else {
+            self.events.clear();
+            return self.bad("record advances beyond the last representable offset");
+        };
+        self.pos += record_len as u64;
+        self.next_offset = next_offset;
+        Ok(Step::Record)
     }
 
     fn events(&self) -> impl Iterator<Item = (u64, &[u8])> {
@@ -945,6 +979,36 @@ mod tests {
             );
             assert_eq!(log.append(&[event(9)]).unwrap(), 3);
         }
+    }
+
+    #[test]
+    fn malformed_batch_never_applies_a_valid_prefix_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut log, _, _) = open(tmp.path());
+        log.append(&[event(0)]).unwrap();
+        drop(log);
+
+        let first = event(1);
+        let second_length_pos = RECORD_HEADER_LEN as usize + 4 + first.len();
+        let mut frame = encode_record(1, &[first, event(2)]).unwrap();
+        frame[second_length_pos..second_length_pos + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let crc = record_crc(&frame);
+        frame[4..8].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(
+            try_decode_record(1, &frame),
+            Err(FrameError::MalformedPayload)
+        );
+        OpenOptions::new()
+            .append(true)
+            .open(only_segment(tmp.path()))
+            .unwrap()
+            .write_all(&frame)
+            .unwrap();
+
+        let (log, recovery, seen) = open(tmp.path());
+        assert_eq!(seen, vec![(0, event(0))]);
+        assert_eq!(log.next_offset(), 1);
+        assert_eq!(recovery.truncated_bytes, frame.len() as u64);
     }
 
     #[test]

@@ -26,6 +26,9 @@ pub const B: f32 = 0.75;
 /// letting adversarial code text grow RSS without bound.
 pub const DEFAULT_MAX_TERMS: usize = 250_000;
 const MAX_TOKEN_CHARS: usize = 64;
+/// Prefer probing a long posting list when the scope selects very few docs.
+/// Below this ratio, a sequential pass is more cache-friendly.
+const POSTINGS_PER_PROBE: usize = 32;
 /// Characters that join words into one identifier, path, or version.
 const GLUE: &[char] = &['_', '-', '.', '/', ':', '@', '+', '#', '$', '\\'];
 const STOPWORDS: &[&str] = &[
@@ -223,9 +226,16 @@ impl LexicalIndex {
 
     /// Preserve global BM25 statistics while excluding irrelevant documents
     /// before scoring. The predicate is evaluated once per matching document.
-    pub fn search_where(
+    pub fn search_where(&self, query: &str, accept: impl FnMut(u32) -> bool) -> Vec<(u32, f32)> {
+        self.search_in_docs(query, &[], accept)
+    }
+
+    /// Search only the given sorted, disjoint document lists. An empty slice
+    /// searches all documents. BM25 still uses the full corpus statistics.
+    pub(crate) fn search_in_docs(
         &self,
         query: &str,
+        doc_lists: &[&[u32]],
         mut accept: impl FnMut(u32) -> bool,
     ) -> Vec<(u32, f32)> {
         let n = self.doc_len.len();
@@ -244,20 +254,39 @@ impl LexicalIndex {
         if postings.is_empty() {
             return Vec::new();
         }
-        let mut scores = vec![0f32; n];
+        let selected = doc_lists.iter().map(|docs| docs.len()).sum::<usize>();
+        // A rare query can touch fewer documents than the scope contains. In
+        // that case look up membership only for hits instead of marking a
+        // score slot for each member of the scope.
+        let mark_scope = !doc_lists.is_empty()
+            && postings.iter().map(|list| list.len()).sum::<usize>() >= selected;
+        let check_scope = !doc_lists.is_empty() && !mark_scope;
+        let mut scores = if mark_scope {
+            let mut scores = vec![-1.0; n];
+            for &doc in doc_lists.iter().flat_map(|docs| docs.iter()) {
+                scores[doc as usize] = 0.0;
+            }
+            scores
+        } else {
+            vec![0.0; n]
+        };
         let mut touched = Vec::new();
         for list in postings {
             let df = list.len() as f32;
             let idf = (1.0 + (n as f32 - df + 0.5) / (df + 0.5)).ln();
-            for &(doc, tf) in list {
+            let mut score_posting = |&(doc, tf): &(u32, u32)| {
                 let slot = &mut scores[doc as usize];
                 if *slot < 0.0 {
-                    continue;
+                    return;
                 }
                 if *slot == 0.0 {
-                    if !accept(doc) {
+                    let in_scope = !check_scope
+                        || doc_lists
+                            .iter()
+                            .any(|docs| docs.binary_search(&doc).is_ok());
+                    if !in_scope || !accept(doc) {
                         *slot = -1.0;
-                        continue;
+                        return;
                     }
                     touched.push(doc);
                 }
@@ -265,6 +294,15 @@ impl LexicalIndex {
                 let len = self.doc_len[doc as usize] as f32;
                 let score = idf * tf * (K1 + 1.0) / (tf + K1 * (1.0 - B + B * len / avg_len));
                 *slot += score;
+            };
+            if selected != 0 && selected <= list.len() / POSTINGS_PER_PROBE {
+                for &doc in doc_lists.iter().flat_map(|docs| docs.iter()) {
+                    if let Ok(at) = list.binary_search_by_key(&doc, |&(doc, _)| doc) {
+                        score_posting(&list[at]);
+                    }
+                }
+            } else {
+                list.iter().for_each(score_posting);
             }
         }
         touched.sort_unstable();
@@ -298,6 +336,36 @@ mod tests {
         assert_eq!(actual, expected);
         index.clear_doc(12);
         assert!(!index.search("code12").iter().any(|(doc, _)| *doc == 12));
+    }
+
+    #[test]
+    fn scoped_search_preserves_global_scores_for_common_and_rare_terms() {
+        let mut index = LexicalIndex::default();
+        for i in 0..256 {
+            index.add(i, &format!("common linker failure code{i}"));
+        }
+        let docs: &[&[u32]] = &[&[3, 81], &[25, 200]];
+        let expected = index.search_where("linker code200", |doc| {
+            doc != 25 && docs.iter().any(|list| list.contains(&doc))
+        });
+        let mut checked = std::collections::BTreeSet::new();
+        let actual = index.search_in_docs("linker code200", docs, |doc| {
+            assert!(docs.iter().any(|list| list.contains(&doc)));
+            assert!(checked.insert(doc));
+            doc != 25
+        });
+        assert_eq!(actual, expected);
+
+        // A rare posting also takes the membership check path on its own.
+        assert_eq!(
+            index.search_in_docs("code200", docs, |_| true),
+            index.search("code200"),
+        );
+        assert!(
+            index
+                .search_in_docs("code199", docs, |_| unreachable!())
+                .is_empty()
+        );
     }
 
     #[test]

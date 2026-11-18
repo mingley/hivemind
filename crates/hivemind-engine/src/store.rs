@@ -4,8 +4,8 @@
 //! Every write is validated against the current state, appended to the log,
 //! flushed, and only then applied to the projections and acknowledged. The
 //! single log lock serializes writers, so validation and apply always see the
-//! same state. Readers take a read lock on the projections and never wait for a
-//! flush.
+//! same state. Readers use the projections and a view of the applied log, so
+//! reading a claim or change feed doesn't acquire the writer's log lock.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -21,7 +21,7 @@ use hivemind_core::{
     EventBody, EventId, EvidenceRef, Origin, Outcome, RetractReason, Scope, Status, Timestamp,
     check_promotion,
 };
-use parking_lot::{Mutex, ReentrantMutex, RwLock};
+use parking_lot::{Condvar, Mutex, ReentrantMutex, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::blob::BlobStore;
@@ -30,7 +30,7 @@ use crate::error::{Error, Result};
 use crate::fsutil;
 use crate::indexseg::LexicalSegment;
 use crate::lexical::DEFAULT_MAX_TERMS;
-use crate::log::{DEFAULT_SEGMENT_BYTES, Durability, Log, Recovery};
+use crate::log::{DEFAULT_SEGMENT_BYTES, Durability, Log, LogView, Recovery};
 use crate::recall::{self, Card, ClaimDetail, Flag, Query, Recall};
 use crate::snapshot::{self, SnapshotInfo};
 use crate::state::{ArtifactRow, LeaseRow, State};
@@ -229,33 +229,24 @@ impl ChangesFilter {
         if self.scopes.is_none() && self.claims.is_none() && self.kinds.is_none() {
             return true;
         }
-        let claim_id = event.body.claim();
-        let row = claim_id.and_then(|id| store.state.read().row(&id).cloned());
-        if let Some(scopes) = &self.scopes {
-            let Some(row) = &row else {
-                return false;
-            };
-            if !scopes.iter().any(|s| s == &row.scope) {
-                return false;
-            }
+        let Some(id) = event.body.claim() else {
+            return false;
+        };
+        if self.claims.as_ref().is_some_and(|ids| !ids.contains(&id)) {
+            return false;
         }
-        if let Some(claims) = &self.claims {
-            let Some(id) = claim_id else {
-                return false;
-            };
-            if !claims.contains(&id) {
-                return false;
-            }
+        if self.scopes.is_none() && self.kinds.is_none() {
+            return true;
         }
-        if let Some(kinds) = &self.kinds {
-            let Some(row) = &row else {
-                return false;
-            };
-            if !kinds.iter().any(|k| k == &row.kind) {
-                return false;
-            }
-        }
-        true
+        store.state.read().row(&id).is_some_and(|row| {
+            self.scopes
+                .as_ref()
+                .is_none_or(|scopes| scopes.contains(&row.scope))
+                && self
+                    .kinds
+                    .as_ref()
+                    .is_none_or(|kinds| kinds.contains(&row.kind))
+        })
     }
 }
 
@@ -271,6 +262,10 @@ pub struct Store {
     dir: PathBuf,
     manifest: Manifest,
     log: Mutex<Log>,
+    // Published while holding the projection write lock, after the durable
+    // append and state update. Readers can take this view during the next fsync.
+    applied_log: Mutex<LogView>,
+    applied_changed: Condvar,
     state: RwLock<State>,
     blobs: BlobStore,
     recovery: Recovery,
@@ -368,6 +363,8 @@ impl Store {
             maintenance: ReentrantMutex::new(()),
             dir,
             manifest,
+            applied_log: Mutex::new(log.view()),
+            applied_changed: Condvar::new(),
             log: Mutex::new(log),
             state: RwLock::new(state),
             blobs,
@@ -486,7 +483,6 @@ impl Store {
 
     /// Records a new claim, optionally superseding active claims in the same event.
     pub fn remember(&self, actor: &Actor, request: Remember) -> Result<Receipt> {
-        let _maintenance = self.maintenance.lock();
         let Remember {
             mut data,
             supersedes,
@@ -502,6 +498,9 @@ impl Store {
         }
         let claim = ClaimId::generate();
         let statement = data.statement.clone();
+        // Request-local validation can run in parallel. State-dependent
+        // validation, commit and similarity hints still see one write order.
+        let _maintenance = self.maintenance.lock();
         let receipt = self
             .commit(actor, idempotency_key, |state| {
                 if state.claims().len() >= self.max_claims {
@@ -872,6 +871,9 @@ impl Store {
             let row = state
                 .row(&claim)
                 .ok_or_else(|| Error::NotFound(format!("claim {claim}")))?;
+            if row.status == Status::Forgotten {
+                return Err(Error::Conflict(format!("{claim} is forgotten")));
+            }
             if row.status == Status::Retracted {
                 return Err(Error::Conflict(format!("{claim} is already retracted")));
             }
@@ -1127,7 +1129,12 @@ impl Store {
             EventBody::ClaimAsserted { claim, .. } => Some(*claim),
             other => other.claim(),
         };
-        self.state.write().apply(offset, &event);
+        {
+            let mut state = self.state.write();
+            state.apply(offset, &event);
+            *self.applied_log.lock() = log.view();
+        }
+        self.applied_changed.notify_all();
         Ok(Some(Receipt {
             event: event.id,
             offset,
@@ -1142,33 +1149,28 @@ impl Store {
         let Some(row) = state.row(&claim) else {
             return Vec::new();
         };
-        let hits = state.lexical.search_where(statement, |doc| {
-            let other = &state.claims[doc as usize];
-            other.scope == row.scope && other.status == Status::Active
-        });
-        let own = hits
+        let mut found = state.search_lexical(statement, std::slice::from_ref(&row.scope), false);
+        let own = found
             .iter()
             .find(|(doc, _)| *doc == row.doc)
             .map_or(0.0, |(_, score)| *score);
         if own <= 0.0 {
             return Vec::new();
         }
-        let mut found: Vec<(u32, f32)> = hits
-            .into_iter()
-            .filter(|(doc, score)| {
-                let other = &state.claims[*doc as usize];
-                *doc != row.doc
-                    && score / own >= SIMILARITY_THRESHOLD
-                    && other.status == Status::Active
-                    && other.scope == row.scope
-                    && !exclude.contains(&other.id)
-            })
-            .collect();
-        found.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        found.retain(|(doc, score)| {
+            *doc != row.doc
+                && score / own >= SIMILARITY_THRESHOLD
+                && !exclude.contains(&state.claims[*doc as usize].id)
+        });
+        let by_score = |a: &(u32, f32), b: &(u32, f32)| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0));
+        if found.len() > MAX_SIMILAR {
+            found.select_nth_unstable_by(MAX_SIMILAR, by_score);
+            found.truncate(MAX_SIMILAR);
+        }
+        found.sort_unstable_by(by_score);
         let now = Timestamp::now();
         found
             .into_iter()
-            .take(MAX_SIMILAR)
             .map(|(doc, score)| {
                 let other = &state.claims[doc as usize];
                 // Compare conditions: a similar claim under other conditions shows as a mismatch.
@@ -1185,23 +1187,26 @@ impl Store {
 
     /// Loads the full [`ClaimData`] for a claim from its log offset.
     pub(crate) fn load_claim_data(&self, offset: u64) -> Result<ClaimData> {
-        let view = self.log.lock().view();
-        let rows = view.read(offset, 1)?;
-        let Some((got, bytes)) = rows.into_iter().next() else {
+        let view = self.applied_log.lock().clone();
+        let mut event = None;
+        view.scan(offset, |got, bytes| {
+            if got != offset {
+                return Err(Error::corruption(
+                    self.dir.join("log"),
+                    offset,
+                    format!("expected offset {offset}, read {got}"),
+                ));
+            }
+            event = Some(codec::decode(offset, bytes)?);
+            Ok(false)
+        })?;
+        let Some(event) = event else {
             return Err(Error::corruption(
                 self.dir.join("log"),
                 offset,
                 format!("no event at offset {offset}"),
             ));
         };
-        if got != offset {
-            return Err(Error::corruption(
-                self.dir.join("log"),
-                offset,
-                format!("expected offset {offset}, read {got}"),
-            ));
-        }
-        let event = codec::decode(offset, &bytes)?;
         match event.body {
             EventBody::ClaimAsserted { data, .. } => Ok(*data),
             _ => Err(Error::corruption(
@@ -1239,13 +1244,13 @@ impl Store {
         context: Option<&Context>,
         workspace: Option<&std::path::Path>,
     ) -> Option<ClaimDetail> {
-        let (offset, _) = {
+        let offset = {
             let state = self.state.read();
             let row = state.row(id)?;
             if row.status == Status::Forgotten {
                 return None;
             }
-            (row.offset, row.id)
+            row.offset
         };
         let data = self.load_claim_data(offset).ok()?;
         let checks = workspace
@@ -1253,6 +1258,9 @@ impl Store {
             .unwrap_or_default();
         let state = self.state.read();
         let row = state.row(id)?;
+        if row.status == Status::Forgotten {
+            return None;
+        }
         Some(recall::detail_with_citations(
             &state, row, &data, context, checks,
         ))
@@ -1267,16 +1275,21 @@ impl Store {
                 .map(|_| id)
                 .ok_or_else(|| Error::NotFound(format!("claim {id}")));
         }
-        let prefix = text.trim().trim_start_matches("clm_").to_ascii_lowercase();
-        if prefix.len() < 4 || !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+        let prefix = text.trim().trim_start_matches("clm_");
+        if prefix.len() < 4 || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(Error::Invalid(format!(
                 "`{text}` is not a claim ID or a prefix of at least 4 hex digits"
             )));
         }
+        if prefix.len() > 32 {
+            return Err(Error::NotFound(format!("no claim matches `{text}`")));
+        }
+        let bits = u128::from_str_radix(prefix, 16).expect("valid UUID prefix");
+        let shift = (32 - prefix.len()) * 4;
         let mut matches = state
             .claims()
             .iter()
-            .filter(|row| row.id.as_uuid().simple().to_string().starts_with(&prefix));
+            .filter(|row| row.id.as_uuid().as_u128() >> shift == bits);
         match (matches.next(), matches.next()) {
             (Some(row), None) => Ok(row.id),
             (None, _) => Err(Error::NotFound(format!("no claim matches `{text}`"))),
@@ -1310,47 +1323,34 @@ impl Store {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let view = self.log.lock().view();
+        let view = self.applied_log.lock().clone();
         let mut out = Vec::new();
-        let mut cursor = from;
-        // Scan ahead of `limit` so filtered feeds still make progress.
-        let batch = limit.saturating_mul(4).max(limit);
-        loop {
-            let batch_rows = view.read(cursor, batch)?;
-            if batch_rows.is_empty() {
-                break;
+        view.scan(from, |offset, bytes| {
+            let event = codec::decode(offset, bytes)?;
+            if filter.matches(self, &event) {
+                out.push((offset, event));
             }
-            for (offset, bytes) in batch_rows {
-                cursor = offset + 1;
-                let event = codec::decode(offset, &bytes)?;
-                if filter.matches(self, &event) {
-                    out.push((offset, event));
-                    if out.len() >= limit {
-                        return Ok(out);
-                    }
-                }
-            }
-        }
+            Ok(out.len() < limit)
+        })?;
         Ok(out)
     }
 
     /// Blocks until projections have applied through `min_offset`, or until
     /// `timeout` elapses. Used for read-your-writes after a write receipt.
     pub fn wait_for_offset(&self, min_offset: u64, timeout: Duration) -> Result<()> {
-        if self.next_offset() > min_offset {
-            return Ok(());
-        }
         // `next_offset` is the next write's offset, so reaching `min_offset`
         // means next_offset > min_offset (the event at min_offset is applied).
-        let deadline = Instant::now() + timeout;
-        while self.next_offset() <= min_offset {
-            if Instant::now() >= deadline {
+        let start = Instant::now();
+        let mut view = self.applied_log.lock();
+        while view.end() <= min_offset {
+            let remaining = timeout.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
                 return Err(Error::Timeout(format!(
                     "projections at {} have not reached offset {min_offset}",
-                    self.next_offset().saturating_sub(1)
+                    view.end().saturating_sub(1)
                 )));
             }
-            std::thread::sleep(Duration::from_millis(5));
+            self.applied_changed.wait_for(&mut view, remaining);
         }
         Ok(())
     }
@@ -1781,5 +1781,45 @@ fn sanitize(data: &mut ClaimData) {
         if let EvidenceRef::Quote(quote) = evidence {
             clean(quote);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn committed_reads_can_progress_while_a_writer_holds_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), Options::default()).unwrap();
+        let receipt = store
+            .remember(
+                &Actor::agent("writer"),
+                Remember::new(ClaimData::new(ClaimKind::Fact, "committed", Scope::Global)),
+            )
+            .unwrap();
+        let id = receipt.claim.unwrap();
+
+        std::thread::scope(|threads| {
+            let (finished, result) = mpsc::channel();
+            let writer = store.log.lock();
+            let store = &store;
+            let reader = threads.spawn(move || {
+                store
+                    .wait_for_offset(receipt.offset, Duration::ZERO)
+                    .unwrap();
+                assert_eq!(store.get(&id, None).unwrap().statement, "committed");
+                assert_eq!(
+                    store.events(receipt.offset, 1).unwrap()[0].1.id,
+                    receipt.event
+                );
+                finished.send(()).unwrap();
+            });
+            let read = result.recv_timeout(Duration::from_secs(2));
+            drop(writer);
+            reader.join().unwrap();
+            read.expect("committed reads waited for the writer's log lock");
+        });
     }
 }

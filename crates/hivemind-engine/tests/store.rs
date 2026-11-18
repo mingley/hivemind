@@ -692,6 +692,7 @@ fn resolves_prefixes_and_streams_events() {
     let hex = id.as_uuid().simple().to_string();
     assert_eq!(store.resolve(&id.to_string()).unwrap(), id);
     assert_eq!(store.resolve(&hex[..20]).unwrap(), id);
+    assert_eq!(store.resolve(&hex[..21].to_ascii_uppercase()).unwrap(), id);
     assert!(store.resolve("zz").is_err());
 
     store
@@ -947,6 +948,68 @@ fn a_manifest_without_its_log_is_refused() {
         Store::open(tmp.path(), options()),
         Err(Error::Format(_))
     ));
+}
+
+#[test]
+fn scoped_search_keeps_history_and_excludes_forgotten_claims_after_reopen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let author = agent("author");
+    let api = project();
+    let web: Scope = "project:acme/web".parse().unwrap();
+    let ops: Scope = "team:ops".parse().unwrap();
+    let query = Query {
+        text: "linker fix".into(),
+        scopes: vec![web.clone(), api.clone(), web.clone()],
+        include_history: true,
+        ..Query::default()
+    };
+
+    let store = Store::open(tmp.path(), options()).unwrap();
+    let mut ids = Vec::new();
+    for (scope, text) in [
+        (api, "linker fix from an earlier build"),
+        (web.clone(), "linker fix for the current build"),
+        (web, "linker fix that was erased"),
+        (ops, "linker fix for the ops team"),
+    ] {
+        let receipt = store
+            .remember(
+                &author,
+                Remember::new(ClaimData::new(ClaimKind::Fact, text, scope)),
+            )
+            .unwrap();
+        ids.push(receipt.claim.unwrap());
+    }
+    store
+        .retract(
+            &author,
+            ids[0],
+            RetractReason::Wrong,
+            "obsolete",
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .forget(&author, ids[2], "erase test claim", None)
+        .unwrap();
+    let mut expected = ids[..2].to_vec();
+    expected.sort_unstable();
+    let verify_scope = |store: &Store| {
+        let result = store.recall(&query);
+        let mut recalled: Vec<_> = result.cards.iter().map(|card| card.id).collect();
+        recalled.sort_unstable();
+        assert_eq!(recalled, expected);
+        let active = store.recall(&Query {
+            include_history: false,
+            ..query.clone()
+        });
+        assert_eq!(active.cards.len(), 1);
+        assert_eq!(active.cards[0].id, ids[1]);
+    };
+    verify_scope(&store);
+    drop(store);
+    verify_scope(&Store::open(tmp.path(), options()).unwrap());
 }
 
 /// P0-D: forget purges payload from projections and the log; reopen stays forgotten.

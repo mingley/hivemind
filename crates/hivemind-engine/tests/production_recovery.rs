@@ -1,5 +1,5 @@
 //! Full restore and interrupted privacy-erasure contracts.
-use hivemind_core::{Actor, ClaimData, ClaimKind, EvidenceRef, Origin};
+use hivemind_core::{Actor, ClaimData, ClaimKind, EvidenceRef, Origin, RetractReason};
 use hivemind_engine::{Options, Remember, Store};
 
 fn seed(store: &Store) -> (hivemind_core::ClaimId, hivemind_core::BlobHash) {
@@ -73,6 +73,17 @@ fn failed_blob_delete_is_reported_and_retried_after_restart() {
                 .is_err()
         );
         assert!(store.get(&id, None).is_none());
+        assert!(matches!(
+            store.retract(
+                &Actor::agent("writer"),
+                id,
+                RetractReason::Wrong,
+                "",
+                None,
+                None
+            ),
+            Err(hivemind_engine::Error::Conflict(_))
+        ));
         std::fs::remove_dir(&blob).unwrap();
         id
     };

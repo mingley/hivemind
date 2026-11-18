@@ -84,3 +84,29 @@ explicitly raised 1M admission limit should provision at least 2.5 GiB per
 store and allow ~24 s replay on a host like this one. Default remains 100k.
 The 50 MB laptop goal remains unmet at 100k. Lexical search remains the default;
 embeddings are optional and require a separate build/model budget.
+
+## Scoped recall and reads during writes on `main`
+
+Scope filters use sorted lists of document IDs to narrow lexical scoring and
+the similarity search on `remember`. Scoring still uses the full corpus
+statistics. Claim expansion and change feeds read the applied log while a
+writer flushes its next record. The log reader validates each frame directly
+in its reusable buffer. Existing stores open with the same format.
+
+The following results are medians of three alternating runs against `8623163`
+on one Linux x86-64 host. Both builds read the same warm, synthetic log with
+100,000 claims spread over 256 scopes. Recall used 512 queries per case.
+The mixed workload ran four writers with durable commits and a reader that
+expanded existing claims about every 2 ms. Timings are engine calls.
+
+| Operation | Baseline p95 | With changes p95 |
+|---|---:|---:|
+| Common terms, one scope | 1.259 ms | 0.146 ms |
+| Common terms, eight scopes | 6.605 ms | 0.807 ms |
+| Unique term, one scope | 7.12 µs | 7.01 µs |
+| Expand a claim during concurrent writes | 1.869 ms | 0.280 ms |
+
+Ordered results, scores and match counts agreed across 120 comparison queries.
+Process RSS for this workload was 66.4 MiB before and 66.9 MiB with the scope
+lists. The [default-capacity benchmark](#default-capacity-latency-100000-claims)
+continues to check broader queries and disk flushes at 100,000 claims.

@@ -208,12 +208,7 @@ pub(crate) fn recall(state: &State, query: &Query) -> Recall {
             .map(|doc| (doc, 1.0))
             .collect()
     } else {
-        state.lexical.search_where(&query.text, |doc| {
-            let row = &state.claims[doc as usize];
-            (query.scopes.is_empty() || query.scopes.contains(&row.scope))
-                && row.status != Status::Forgotten
-                && (query.include_history || row.status == Status::Active)
-        })
+        state.search_lexical(&query.text, &query.scopes, query.include_history)
     };
 
     let vector_hits: Vec<(u32, f32)> = query
@@ -243,6 +238,7 @@ pub(crate) fn recall(state: &State, query: &Query) -> Recall {
 
     // Pass 1: filters and cheap per-row multipliers.
     let mut ranked: Vec<(u32, f32, Applicability)> = Vec::new();
+    let boost_text = query.entity_boost.then(|| query.text.to_ascii_lowercase());
     for (doc, base) in candidates {
         let Some(row) = state.claims.get(doc as usize) else {
             continue;
@@ -273,8 +269,8 @@ pub(crate) fn recall(state: &State, query: &Query) -> Recall {
             continue;
         }
         let mut score = base * row_multiplier(row, &applicability, now);
-        if query.entity_boost {
-            score *= entity_boost_multiplier(row, &query.text);
+        if let Some(text) = &boost_text {
+            score *= entity_boost_multiplier(row, text);
         }
         // C3: novelty / prediction-error salience weights ranking, never gates writes.
         score *= salience_multiplier(row);
@@ -335,15 +331,14 @@ pub(crate) fn recall(state: &State, query: &Query) -> Recall {
     }
 }
 
-fn entity_boost_multiplier(row: &ClaimRow, text: &str) -> f32 {
-    if row.about.is_empty() || text.is_empty() {
+fn entity_boost_multiplier(row: &ClaimRow, lowercase_text: &str) -> f32 {
+    if row.about.is_empty() || lowercase_text.is_empty() {
         return 1.0;
     }
-    let lower = text.to_ascii_lowercase();
     let hit = row.about.iter().any(|entity| {
         let e = entity.to_ascii_lowercase();
         let bare = e.rsplit('/').next().unwrap_or(&e);
-        lower.contains(&e) || (!bare.is_empty() && lower.contains(bare))
+        lowercase_text.contains(&e) || (!bare.is_empty() && lowercase_text.contains(bare))
     });
     if hit { 1.25 } else { 1.0 }
 }

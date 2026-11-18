@@ -22,6 +22,7 @@ use hivemind_core::{
     TrustTier, Verification,
 };
 use serde::Serialize;
+use smallvec::SmallVec;
 
 use crate::lexical::{DEFAULT_MAX_TERMS, LexicalIndex};
 use crate::vector::VectorIndex;
@@ -231,6 +232,7 @@ pub struct State {
     condition_sets: HashMap<BTreeMap<String, String>, Arc<BTreeMap<String, String>>>,
     pub(crate) claims: Vec<ClaimRow>,
     by_id: HashMap<ClaimId, u32>,
+    by_scope: HashMap<Scope, SmallVec<[u32; 1]>>,
     pub(crate) by_entity: HashMap<Arc<str>, Vec<u32>>,
     pub(crate) edges: Vec<EdgeRow>,
     edges_by_claim: HashMap<ClaimId, Vec<u32>>,
@@ -261,6 +263,7 @@ impl State {
             condition_sets: HashMap::new(),
             claims: Vec::new(),
             by_id: HashMap::new(),
+            by_scope: HashMap::new(),
             by_entity: HashMap::new(),
             edges: Vec::new(),
             edges_by_claim: HashMap::new(),
@@ -291,6 +294,35 @@ impl State {
         &self.claims
     }
 
+    pub(crate) fn search_lexical(
+        &self,
+        text: &str,
+        scopes: &[Scope],
+        include_history: bool,
+    ) -> Vec<(u32, f32)> {
+        let visible = |doc: u32| {
+            let status = self.claims[doc as usize].status;
+            status != Status::Forgotten && (include_history || status == Status::Active)
+        };
+        if scopes.is_empty() {
+            return self.lexical.search_where(text, visible);
+        }
+
+        // Treat repeated scope filters as one. Each document belongs to one
+        // scope, so the resulting lists can be searched without merging them.
+        let mut scopes: SmallVec<[&Scope; 4]> = scopes.iter().collect();
+        scopes.sort_unstable();
+        scopes.dedup();
+        let lists: SmallVec<[&[u32]; 4]> = scopes
+            .into_iter()
+            .filter_map(|scope| self.by_scope.get(scope).map(SmallVec::as_slice))
+            .collect();
+        if lists.is_empty() {
+            return Vec::new();
+        }
+        self.lexical.search_in_docs(text, &lists, visible)
+    }
+
     /// Purge projection content for a forgotten claim. Keeps the id/tombstone
     /// so audit and reopen stay consistent; removes searchable payload.
     fn shred_claim(
@@ -304,6 +336,15 @@ impl State {
     ) {
         self.lexical.clear_doc(doc);
         self.vectors.remove(doc);
+        let scope = &self.claims[doc as usize].scope;
+        if let Some(docs) = self.by_scope.get_mut(scope) {
+            if let Ok(index) = docs.binary_search(&doc) {
+                docs.remove(index);
+            }
+            if docs.is_empty() {
+                self.by_scope.remove(scope);
+            }
+        }
 
         // Drop entity postings so forgotten claims cannot be found by entity.
         let entities: Vec<Arc<str>> = self.row(claim).map(|r| r.about.clone()).unwrap_or_default();
@@ -413,7 +454,7 @@ impl State {
                 at: when,
                 reason,
             } => match self.row_mut(claim) {
-                Some(row) => {
+                Some(row) if row.status != Status::Forgotten => {
                     row.status = Status::Invalidated;
                     row.invalidation = Some(Box::new(Invalidation {
                         at: *when,
@@ -422,6 +463,7 @@ impl State {
                         by: Arc::clone(&by),
                     }));
                 }
+                Some(_) => {}
                 None => known = false,
             },
             EventBody::ClaimRetracted {
@@ -430,7 +472,7 @@ impl State {
                 note,
                 corrected_by,
             } => match self.row_mut(claim) {
-                Some(row) => {
+                Some(row) if row.status != Status::Forgotten => {
                     row.status = Status::Retracted;
                     row.retraction = Some(Box::new(Retraction {
                         reason: *reason,
@@ -440,6 +482,8 @@ impl State {
                         by: Arc::clone(&by),
                     }));
                 }
+                // Older writers could retract forgotten IDs. Erasure stays final.
+                Some(_) => {}
                 None => known = false,
             },
             EventBody::EdgeAdded {
@@ -653,6 +697,7 @@ impl State {
                 .push(doc);
         }
         let scope = self.intern_scope(&data.scope);
+        self.by_scope.entry(scope.clone()).or_default().push(doc);
         let (statement_cache, statement_truncated) =
             truncate_statement(&data.statement, STATEMENT_CACHE_CHARS);
         let author_agent = event.actor.agent.as_deref().map(|a| self.intern.intern(a));
@@ -909,6 +954,49 @@ mod tests {
         assert_eq!(intern.len(), 1);
         let _ = intern.intern("other");
         assert_eq!(intern.len(), 2);
+    }
+
+    #[test]
+    fn legacy_retraction_cannot_reopen_a_forgotten_claim() {
+        let mut state = State::default();
+        let claim = ClaimId::generate();
+        let scope = Scope::Project("old-project".into());
+        let actor = Actor::agent("writer");
+        let mut apply = |body| {
+            state.apply(
+                state.next_offset,
+                &Event {
+                    v: hivemind_core::EVENT_VERSION,
+                    id: EventId::generate(),
+                    recorded_at: Timestamp::now(),
+                    actor: actor.clone(),
+                    idempotency_key: None,
+                    body,
+                },
+            );
+        };
+        apply(EventBody::ClaimAsserted {
+            claim,
+            supersedes: Vec::new(),
+            data: Box::new(ClaimData::new(
+                ClaimKind::Fact,
+                "obsolete claim",
+                scope.clone(),
+            )),
+        });
+        apply(EventBody::ClaimForgotten {
+            claim,
+            reason: "erase".into(),
+            purged_blobs: Vec::new(),
+        });
+        apply(EventBody::ClaimRetracted {
+            claim,
+            reason: RetractReason::Wrong,
+            note: "legacy event after erasure".into(),
+            corrected_by: None,
+        });
+        assert_eq!(state.row(&claim).unwrap().status, Status::Forgotten);
+        assert!(!state.by_scope.contains_key(&scope));
     }
 
     #[test]
