@@ -1340,10 +1340,53 @@ impl Store {
         let mut kept = Vec::with_capacity(offsets.len());
         let mut used_tokens = 0usize;
         for (card, offset) in offsets {
-            let candidate = match offset.and_then(|off| self.load_claim_data(off).ok()) {
-                Some(data) => recall::expand_card_with_data(&card, &data),
+            let loaded_data = offset.and_then(|off| self.load_claim_data(off).ok());
+            let mut candidate = match &loaded_data {
+                Some(data) => recall::expand_card_with_data(&card, data),
                 None => card,
             };
+            // Hydrate content-addressed cited file snapshots ONLY when the file does not exist
+            // in the reader's current workspace (zero overhead on same-repo reads).
+            if let (Some(ws), Some(data)) = (req.workspace.as_deref(), loaded_data.as_ref()) {
+                let artifact_candidates: Vec<(BlobHash, String)> = {
+                    let state = self.state.read();
+                    data.provenance
+                        .evidence
+                        .iter()
+                        .filter_map(|ev| match ev {
+                            EvidenceRef::Artifact(h) => state.artifacts.get(h).and_then(|art| {
+                                if art.origin == Origin::External || art.size > 8_192 {
+                                    return None;
+                                }
+                                let name = art.name.as_deref()?;
+                                let p = Path::new(name);
+                                if p.is_absolute()
+                                    || p.components()
+                                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                                {
+                                    return None;
+                                }
+                                if ws.join(p).exists() {
+                                    return None;
+                                }
+                                Some((*h, name.to_owned()))
+                            }),
+                            _ => None,
+                        })
+                        .take(2)
+                        .collect()
+                };
+                for (hash, rel_name) in artifact_candidates {
+                    if let Ok(bytes) = self.artifact(&hash)
+                        && let Ok(utf8) = String::from_utf8(bytes)
+                    {
+                        let capped: String = utf8.chars().take(2_400).collect();
+                        if !capped.trim().is_empty() {
+                            candidate.snapshots.push((rel_name, capped));
+                        }
+                    }
+                }
+            }
             let single = recall::render_brief(&req.scopes, std::slice::from_ref(&candidate));
             let cost = recall::estimate_tokens(&single);
             if !kept.is_empty() && used_tokens + cost > budget {

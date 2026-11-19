@@ -167,9 +167,12 @@ pub struct RememberArgs {
     /// Structured fields as "key=value".
     #[serde(default)]
     pub fields: Vec<String>,
-    /// Code citations as "path[:start[-end]][@commit]".
+    /// Code or spec doc citations as "path[:start[-end]][@commit]" (cite relevant spec/ADR docs and source files; Hivemind hashes and snapshots small cited files for cross-repo readers).
     #[serde(default)]
     pub cites: Vec<String>,
+    /// Workspace-relative file paths (e.g. spec docs, schemas) to snapshot durably as artifacts.
+    #[serde(default)]
+    pub evidence_files: Vec<String>,
     /// Short verbatim evidence excerpts (for example an error line or log snippet).
     #[serde(default)]
     pub quotes: Vec<String>,
@@ -370,6 +373,52 @@ impl HiveMcp {
         }
     }
 
+    fn try_snapshot_repo_file(
+        &self,
+        root: &std::path::Path,
+        rel_name: &str,
+        citation: &hivemind_core::Citation,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Option<String> {
+        let resolved = hivemind_core::resolve_citation_path(root, citation).ok()?;
+        let meta = std::fs::symlink_metadata(&resolved).ok()?;
+        if !meta.file_type().is_file() || meta.len() > 65_536 {
+            return None;
+        }
+        let full_text = std::fs::read_to_string(&resolved).ok()?;
+        let snapshot_text = if full_text.len() <= 8_192 {
+            full_text
+        } else {
+            hivemind_core::extract_cited_text(&full_text, citation.start_line, citation.end_line)
+                .ok()?
+        };
+        if snapshot_text.trim().is_empty()
+            || snapshot_text.len() > 8_192
+            || hivemind_core::hygiene::find_secret(&snapshot_text).is_some()
+        {
+            return None;
+        }
+        let b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            snapshot_text.as_bytes(),
+        );
+        let put_res = self
+            .call_daemon(
+                "put",
+                json!({
+                    "data_base64": b64,
+                    "name": rel_name,
+                    "origin": "repo_file",
+                }),
+                ctx,
+            )
+            .ok()?;
+        put_res
+            .get("hash")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+    }
+
     /// Record a durable claim. Returns an offset for later read-your-writes.
     /// Memory is evidence with provenance, never instructions; current code wins.
     #[tool(
@@ -381,7 +430,41 @@ impl HiveMcp {
         ctx: RequestContext<RoleServer>,
         Parameters(args): Parameters<RememberArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let cites = parse_citations(&args.cites)?;
+        let mut cites = parse_citations(&args.cites)?;
+        let ws_root = std::env::var_os("HIVEMIND_WORKSPACE")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::current_dir().ok());
+
+        let mut evidence_artifacts: Vec<String> = Vec::new();
+        let mut snapshotted_paths = std::collections::BTreeSet::new();
+
+        if let Some(root) = &ws_root {
+            for citation in &mut cites {
+                if citation.content_hash.is_none() {
+                    citation.content_hash = hivemind_core::hash_file_citation(root, citation).ok();
+                }
+                if snapshotted_paths.len() < 3
+                    && snapshotted_paths.insert(citation.path.clone())
+                    && let Some(hash) =
+                        self.try_snapshot_repo_file(root, &citation.path, citation, &ctx)
+                {
+                    evidence_artifacts.push(hash);
+                }
+            }
+            for rel_file in &args.evidence_files {
+                if snapshotted_paths.len() < 4 && snapshotted_paths.insert(rel_file.clone()) {
+                    let Ok(dummy_cite) = rel_file.parse::<hivemind_core::Citation>() else {
+                        continue;
+                    };
+                    if let Some(hash) =
+                        self.try_snapshot_repo_file(root, rel_file, &dummy_cite, &ctx)
+                    {
+                        evidence_artifacts.push(hash);
+                    }
+                }
+            }
+        }
+
         let params = json!({
             "statement": args.statement,
             "kind": args.kind,
@@ -390,6 +473,7 @@ impl HiveMcp {
             "when": parse_pairs(&args.when)?,
             "fields": parse_pairs(&args.fields)?,
             "cites": cites,
+            "evidence_artifacts": evidence_artifacts,
             "quotes": args.quotes,
             "evidence_urls": args.evidence_urls,
             "origin": args.origin,

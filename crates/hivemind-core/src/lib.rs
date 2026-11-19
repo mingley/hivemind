@@ -73,8 +73,8 @@ pub mod trust;
 pub use applicability::{Applicability, Context};
 pub use belief::{BELIEF_POLICY, Status, TrustTier, Verification};
 pub use citation::{
-    CONTENT_HASH_PREFIX, CitationCheck, CitationStatus, hash_cited_text, hash_file_citation,
-    verify_citation, verify_citations,
+    CONTENT_HASH_PREFIX, CitationCheck, CitationStatus, extract_cited_text, hash_cited_text,
+    hash_file_citation, resolve_citation_path, verify_citation, verify_citations,
 };
 pub use claim::{
     Citation, ClaimData, ClaimKind, EvidenceRef, Method, Origin, Provenance, ValidationError,

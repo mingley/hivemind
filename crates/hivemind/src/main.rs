@@ -752,10 +752,12 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::Brief(args) => {
+            let ws = workspace_root(&args.context).or_else(|| std::env::current_dir().ok());
             let req = BriefRequest {
                 text: args.query.join(" "),
                 scopes: args.scopes,
                 context: context(&args.context),
+                workspace: ws,
                 limit: args.limit,
                 budget_tokens: args.budget,
                 ..BriefRequest::default()
@@ -1057,10 +1059,12 @@ fn run_via_daemon(
         }
         Command::Brief(args) => {
             let ctx: Vec<(String, String)> = context(&args.context).into_iter().collect();
+            let ws = workspace_root(&args.context).or_else(|| std::env::current_dir().ok());
             let params = json!({
                 "query": args.query.join(" "),
                 "scopes": args.scopes,
                 "ctx": ctx,
+                "workspace": ws,
                 "limit": args.limit,
                 "budget": args.budget,
             });
@@ -1600,6 +1604,14 @@ fn run_hook_brief(
             .to_owned()
     };
 
+    let hook_cwd: Option<PathBuf> = payload
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| workspace_root(&args.context))
+        .or_else(|| std::env::current_dir().ok());
+
     let mut scopes = args.scopes.clone();
     if scopes.is_empty() {
         let cwd_str = payload.get("cwd").and_then(|v| v.as_str());
@@ -1620,6 +1632,7 @@ fn run_hook_brief(
                 "query": query_text,
                 "scopes": scopes,
                 "ctx": ctx_vec,
+                "workspace": hook_cwd,
                 "limit": args.limit,
                 "budget": args.budget,
             }),
@@ -1639,6 +1652,7 @@ fn run_hook_brief(
                         "query": query_text,
                         "scopes": scopes,
                         "ctx": ctx_vec,
+                        "workspace": hook_cwd,
                         "limit": args.limit,
                         "budget": args.budget,
                     }),
@@ -1654,6 +1668,7 @@ fn run_hook_brief(
                     text: query_text,
                     scopes,
                     context: ctx_map,
+                    workspace: hook_cwd,
                     limit: args.limit,
                     budget_tokens: args.budget,
                     ..BriefRequest::default()

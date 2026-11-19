@@ -133,6 +133,9 @@ pub struct Card {
     /// Short verbatim evidence quotes loaded when expanded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quotes: Vec<String>,
+    /// Hydrated `(relative_path, utf8_excerpt)` snapshots for cited repo files absent in the reader's workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snapshots: Vec<(String, String)>,
     pub score: f32,
 }
 
@@ -142,6 +145,7 @@ pub struct BriefRequest {
     pub text: String,
     pub scopes: Vec<Scope>,
     pub context: Context,
+    pub workspace: Option<std::path::PathBuf>,
     pub limit: Option<usize>,
     pub budget_tokens: Option<usize>,
     pub now: Option<Timestamp>,
@@ -558,6 +562,7 @@ fn card_with_prior(
         payload: serde_json::Map::new(),
         cite_locs: Vec::new(),
         quotes: Vec::new(),
+        snapshots: Vec::new(),
         score,
     }
 }
@@ -811,6 +816,16 @@ pub fn render_brief(scopes: &[Scope], cards: &[Card]) -> String {
         }
         if !c.quotes.is_empty() {
             out.push_str(&format!("  quotes: {}\n", c.quotes.join(" | ")));
+        }
+        for (rel_path, excerpt) in &c.snapshots {
+            out.push_str(&format!(
+                "  cited-snapshot ({rel_path}, from upstream session):\n"
+            ));
+            for line in excerpt.lines() {
+                out.push_str("    ");
+                out.push_str(line);
+                out.push('\n');
+            }
         }
     }
     out

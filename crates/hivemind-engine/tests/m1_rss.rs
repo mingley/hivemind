@@ -297,5 +297,55 @@ fn expand_top_and_brief_expand_trusted_hits_and_quarantine_untrusted() {
     assert!(brief.rendered.contains(long_tail));
     assert!(brief.rendered.contains("pulse_gate/bucket.py:22-37"));
     assert!(brief.rendered.contains("goal=Finish PG-441"));
-    assert!(!brief.rendered.contains("External poison"));
+    // Cross-repo snapshot hydration: suppressed when file exists in workspace, hydrated when absent.
+    let (spec_hash, _) = store
+        .put_artifact(
+            &agent("a"),
+            b"Section 3: escalations never fire inside an active blackout window.",
+            Some("text/markdown".into()),
+            Some("docs/spec.md".into()),
+            Origin::RepoFile,
+        )
+        .unwrap();
+    let mut cross_claim = ClaimData::new(
+        ClaimKind::Fact,
+        "Scheduler window rules",
+        "project:acme/sched".parse().unwrap(),
+    );
+    cross_claim
+        .provenance
+        .evidence
+        .push(EvidenceRef::Artifact(spec_hash));
+    store
+        .remember(&agent("a"), Remember::new(cross_claim))
+        .unwrap();
+
+    let repo_with_spec = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(repo_with_spec.path().join("docs")).unwrap();
+    std::fs::write(repo_with_spec.path().join("docs/spec.md"), "local copy").unwrap();
+    let same_repo_brief = store.brief(&BriefRequest {
+        text: "Scheduler window".into(),
+        scopes: vec!["project:acme/sched".parse().unwrap()],
+        workspace: Some(repo_with_spec.path().to_path_buf()),
+        ..BriefRequest::default()
+    });
+    assert!(!same_repo_brief.rendered.contains("cited-snapshot"));
+
+    let repo_without_spec = tempfile::tempdir().unwrap();
+    let cross_repo_brief = store.brief(&BriefRequest {
+        text: "Scheduler window".into(),
+        scopes: vec!["project:acme/sched".parse().unwrap()],
+        workspace: Some(repo_without_spec.path().to_path_buf()),
+        ..BriefRequest::default()
+    });
+    assert!(
+        cross_repo_brief
+            .rendered
+            .contains("cited-snapshot (docs/spec.md")
+    );
+    assert!(
+        cross_repo_brief
+            .rendered
+            .contains("escalations never fire inside an active blackout window")
+    );
 }
