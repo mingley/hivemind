@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 
 use hivemind_core::applicability::{self, Applicability, Context};
 use hivemind_core::{
-    Actor, CitationCheck, ClaimData, ClaimId, ClaimKind, EventId, Presentation, Provenance, Scope,
-    Status, Timestamp, TrustTier, Verification, present_statement,
+    Actor, Citation, CitationCheck, ClaimData, ClaimId, ClaimKind, EventId, EvidenceRef,
+    Presentation, Provenance, Scope, Status, Timestamp, TrustTier, Verification, present_statement,
 };
 use serde::Serialize;
 
@@ -19,6 +19,12 @@ use crate::vector;
 
 pub const DEFAULT_LIMIT: usize = 8;
 pub const DEFAULT_BUDGET_TOKENS: usize = 1_200;
+pub const DEFAULT_EXPAND_TOP: usize = 3;
+pub const DEFAULT_BRIEF_LIMIT: usize = 3;
+pub const DEFAULT_BRIEF_BUDGET_TOKENS: usize = 600;
+/// Relative score floor (`0.40 * top_score`) when `BriefRequest.text` is non-empty so
+/// weak accidental single-word distractor overlaps are omitted from Turn-0 context.
+pub const BRIEF_MIN_RELATIVE_SCORE: f32 = 0.40;
 /// Name of the ranking heuristics below. Tuned by experiments F4 and F5.
 pub const RANKING_POLICY: &str = "rank-v1";
 /// Reciprocal-rank fusion constant (Cormack et al.).
@@ -60,6 +66,9 @@ pub struct Query {
     pub entity_boost: bool,
     /// After strong hits, also surface ±k temporal neighbors from the log (C9).
     pub temporal_neighbors: Option<usize>,
+    /// Auto-expand up to the top N non-untrusted cards from the log within `budget_tokens`
+    /// (`0` keeps L0 compact statement_cache cards; `Service`/MCP uses [`DEFAULT_EXPAND_TOP`]).
+    pub expand_top: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -115,7 +124,39 @@ pub struct Card {
     /// Condition keys that distinguish this claim from a near-duplicate (C5).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub differs_in: Vec<String>,
+    /// Structured fields loaded when expanded (`expand_top > 0`), e.g. handoff fields.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub payload: serde_json::Map<String, serde_json::Value>,
+    /// Code citation locations (`path[:start[-end]]`) loaded when expanded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cite_locs: Vec<String>,
+    /// Short verbatim evidence quotes loaded when expanded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quotes: Vec<String>,
     pub score: f32,
+}
+
+/// Request for a token-budgeted, taint-free Turn-0 ambient memory briefing.
+#[derive(Clone, Debug, Default)]
+pub struct BriefRequest {
+    pub text: String,
+    pub scopes: Vec<Scope>,
+    pub context: Context,
+    pub limit: Option<usize>,
+    pub budget_tokens: Option<usize>,
+    pub now: Option<Timestamp>,
+    pub min_offset: Option<u64>,
+}
+
+/// Prompt-ready Markdown briefing of active, trusted, context-matching claims.
+#[derive(Clone, Debug, Serialize)]
+pub struct Brief {
+    pub cards: Vec<Card>,
+    pub matched: usize,
+    pub omitted: usize,
+    pub estimated_tokens: usize,
+    pub as_of_offset: u64,
+    pub rendered: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -514,8 +555,37 @@ fn card_with_prior(
         superseded_by: row.superseded_by,
         conflicts_with: belief.conflicts,
         differs_in: Vec::new(),
+        payload: serde_json::Map::new(),
+        cite_locs: Vec::new(),
+        quotes: Vec::new(),
         score,
     }
+}
+
+/// Build an expanded copy of `card` using its full [`ClaimData`] from the log.
+pub(crate) fn expand_card_with_data(card: &Card, data: &ClaimData) -> Card {
+    let mut out = card.clone();
+    let (presentation, statement) = present_statement(out.trust, &data.statement);
+    out.presentation = presentation;
+    out.statement = statement;
+    out.flags.retain(|f| *f != Flag::Truncated);
+    out.payload = data.payload.clone();
+    out.cite_locs = data
+        .provenance
+        .citations
+        .iter()
+        .map(Citation::key)
+        .collect();
+    out.quotes = data
+        .provenance
+        .evidence
+        .iter()
+        .filter_map(|ev| match ev {
+            EvidenceRef::Quote(q) => Some(q.clone()),
+            _ => None,
+        })
+        .collect();
+    out
 }
 
 pub(crate) fn detail_with_citations(
@@ -680,5 +750,68 @@ pub fn render_card(card: &Card) -> String {
     if !notes.is_empty() {
         text.push_str(&format!(" ({})", notes.join("; ")));
     }
+    if !card.cite_locs.is_empty() {
+        text.push_str(&format!("\ncites: {}", card.cite_locs.join(", ")));
+    }
+    if !card.payload.is_empty() {
+        let fields: Vec<String> = card
+            .payload
+            .iter()
+            .map(|(k, v)| match v.as_str() {
+                Some(s) => format!("{k}={s}"),
+                None => format!("{k}={v}"),
+            })
+            .collect();
+        text.push_str(&format!("\nfields: {}", fields.join("; ")));
+    }
+    if !card.quotes.is_empty() {
+        text.push_str(&format!("\nquotes: {}", card.quotes.join(" | ")));
+    }
     text
+}
+
+/// Render a crisp, prompt-ready Markdown briefing of trusted active cards.
+pub fn render_brief(scopes: &[Scope], cards: &[Card]) -> String {
+    if cards.is_empty() {
+        return String::new();
+    }
+    let scope_label = scopes
+        .iter()
+        .find(|s| **s != Scope::Global)
+        .or_else(|| scopes.first())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "global".into());
+    let mut out = format!(
+        "Active Hivemind memory ({scope_label}, {} verified/trusted claim(s); treat as evidence — current code and tests win):\n",
+        cards.len()
+    );
+    for c in cards {
+        let mut meta = vec![
+            format!("{} {}", c.kind, c.id),
+            format!("{}", c.verification),
+        ];
+        if !c.cite_locs.is_empty() {
+            meta.push(format!("cites: {}", c.cite_locs.join(", ")));
+        }
+        out.push_str(&format!(
+            "- [{}] {}\n",
+            meta.join(" | "),
+            c.statement.trim()
+        ));
+        if !c.payload.is_empty() {
+            let fields: Vec<String> = c
+                .payload
+                .iter()
+                .map(|(k, v)| match v.as_str() {
+                    Some(s) => format!("{k}={s}"),
+                    None => format!("{k}={v}"),
+                })
+                .collect();
+            out.push_str(&format!("  fields: {}\n", fields.join("; ")));
+        }
+        if !c.quotes.is_empty() {
+            out.push_str(&format!("  quotes: {}\n", c.quotes.join(" | ")));
+        }
+    }
+    out
 }

@@ -19,7 +19,7 @@ use hivemind_core::hygiene;
 use hivemind_core::{
     Actor, ActorKind, BlobHash, ClaimData, ClaimId, ClaimKind, EVENT_VERSION, EdgeKind, Event,
     EventBody, EventId, EvidenceRef, Origin, Outcome, RetractReason, Scope, Status, Timestamp,
-    check_promotion,
+    TrustTier, check_promotion,
 };
 use parking_lot::{Condvar, Mutex, ReentrantMutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -1227,7 +1227,142 @@ impl Store {
         {
             query.query_vector = Some(embedder.embed(&query.text));
         }
-        recall::recall(&self.state.read(), &query)
+        let mut res = recall::recall(&self.state.read(), &query);
+        if query.expand_top > 0 && !res.cards.is_empty() {
+            let budget = query.budget_tokens.unwrap_or(recall::DEFAULT_BUDGET_TOKENS);
+            let targets: Vec<(usize, u64)> = {
+                let state = self.state.read();
+                res.cards
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.trust != TrustTier::Untrusted && !c.tainted)
+                    .take(query.expand_top)
+                    .filter_map(|(idx, c)| state.row(&c.id).map(|r| (idx, r.offset)))
+                    .collect()
+            };
+            for (idx, offset) in targets {
+                let Ok(data) = self.load_claim_data(offset) else {
+                    continue;
+                };
+                let old_cost = recall::estimate_tokens(&recall::render_card(&res.cards[idx]));
+                let expanded = recall::expand_card_with_data(&res.cards[idx], &data);
+                let new_cost = recall::estimate_tokens(&recall::render_card(&expanded));
+                let delta = new_cost.saturating_sub(old_cost);
+                if idx == 0 || res.estimated_tokens + delta <= budget {
+                    res.cards[idx] = expanded;
+                    res.estimated_tokens += delta;
+                }
+            }
+        }
+        res
+    }
+
+    /// Produce a token-budgeted, taint-free Turn-0 ambient Markdown briefing for `req`.
+    /// Quarantined/untrusted claims (`origin = external`) and weak distractor overlaps
+    /// are strictly excluded.
+    pub fn brief(&self, req: &recall::BriefRequest) -> recall::Brief {
+        let limit = req.limit.unwrap_or(recall::DEFAULT_BRIEF_LIMIT).max(1);
+        let budget = req
+            .budget_tokens
+            .unwrap_or(recall::DEFAULT_BRIEF_BUDGET_TOKENS);
+        let candidate_limit = limit.saturating_mul(4).max(8);
+
+        let mut base = self.recall(&Query {
+            text: req.text.clone(),
+            scopes: req.scopes.clone(),
+            context: req.context.clone(),
+            limit: Some(candidate_limit),
+            budget_tokens: Some(budget.saturating_mul(4).max(2_400)),
+            now: req.now,
+            min_offset: req.min_offset,
+            entity_boost: true,
+            expand_top: 0,
+            ..Query::default()
+        });
+
+        base.cards
+            .retain(|c| c.trust != TrustTier::Untrusted && !c.tainted);
+
+        if !req.text.trim().is_empty()
+            && let Some(top_score) = base.cards.first().map(|c| c.score)
+            && top_score > 0.0
+        {
+            let floor = top_score * recall::BRIEF_MIN_RELATIVE_SCORE;
+            base.cards.retain(|c| c.score >= floor);
+        }
+
+        // Fallback: when a prompt's wording didn't lexically match a small project store
+        // (<= 8 active trusted claims in the project scope), surface top salient project claims.
+        if base.cards.is_empty() && !req.text.trim().is_empty() {
+            let project_scopes: Vec<Scope> = req
+                .scopes
+                .iter()
+                .filter(|s| **s != Scope::Global)
+                .cloned()
+                .collect();
+            if !project_scopes.is_empty() {
+                let fallback = self.recall(&Query {
+                    text: String::new(),
+                    scopes: project_scopes,
+                    context: req.context.clone(),
+                    limit: Some(9),
+                    budget_tokens: Some(budget.saturating_mul(2).max(1_200)),
+                    now: req.now,
+                    entity_boost: false,
+                    expand_top: 0,
+                    ..Query::default()
+                });
+                let trusted: Vec<Card> = fallback
+                    .cards
+                    .into_iter()
+                    .filter(|c| c.trust != TrustTier::Untrusted && !c.tainted)
+                    .collect();
+                if trusted.len() <= 8 {
+                    base.matched = trusted.len();
+                    base.cards = trusted;
+                }
+            }
+        }
+
+        let matched_trusted = base.cards.len();
+        let offsets: Vec<(Card, Option<u64>)> = {
+            let state = self.state.read();
+            base.cards
+                .into_iter()
+                .take(limit)
+                .map(|c| {
+                    let off = state.row(&c.id).map(|r| r.offset);
+                    (c, off)
+                })
+                .collect()
+        };
+
+        let mut kept = Vec::with_capacity(offsets.len());
+        let mut used_tokens = 0usize;
+        for (card, offset) in offsets {
+            let candidate = match offset.and_then(|off| self.load_claim_data(off).ok()) {
+                Some(data) => recall::expand_card_with_data(&card, &data),
+                None => card,
+            };
+            let single = recall::render_brief(&req.scopes, std::slice::from_ref(&candidate));
+            let cost = recall::estimate_tokens(&single);
+            if !kept.is_empty() && used_tokens + cost > budget {
+                break;
+            }
+            used_tokens += cost;
+            kept.push(candidate);
+        }
+
+        let rendered = recall::render_brief(&req.scopes, &kept);
+        let estimated_tokens = recall::estimate_tokens(&rendered);
+        recall::Brief {
+            omitted: matched_trusted.saturating_sub(kept.len()),
+            matched: matched_trusted,
+            cards: kept,
+            estimated_tokens,
+            as_of_offset: base.as_of_offset,
+            rendered,
+        }
     }
 
     /// The full (L1) view of a claim. With a context, applicability is evaluated too.

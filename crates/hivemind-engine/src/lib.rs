@@ -34,7 +34,10 @@ pub use log::{
     Durability, FrameError, MAX_RECORD_LEN, Recovery, SEGMENT_FORMAT, SEGMENT_MAGIC, encode_record,
     encode_segment_header, try_decode_record,
 };
-pub use recall::{Card, ClaimDetail, Flag, Query, Recall, render_card};
+pub use recall::{
+    Brief, BriefRequest, Card, ClaimDetail, DEFAULT_BRIEF_BUDGET_TOKENS, DEFAULT_BRIEF_LIMIT,
+    DEFAULT_EXPAND_TOP, Flag, Query, Recall, render_brief, render_card,
+};
 pub use snapshot::SnapshotInfo;
 pub use state::{ArtifactRow, Belief, LeaseRow, STATEMENT_CACHE_CHARS};
 pub use store::{

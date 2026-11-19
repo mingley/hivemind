@@ -13,7 +13,7 @@ use hivemind_core::{
     Method, Origin, Outcome, RetractReason, Scope, Timestamp, consumption_taints_session,
     session_taint_key,
 };
-use hivemind_engine::{ChangesFilter, Query, Store};
+use hivemind_engine::{BriefRequest, ChangesFilter, DEFAULT_EXPAND_TOP, Query, Store};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -86,6 +86,7 @@ impl Service {
             "hello" | "ping" => Ok(serde_json::to_value(self.hello())?),
             "remember" => self.remember(params),
             "recall" => self.recall(params),
+            "brief" => self.brief(params),
             "show" => self.show(params),
             "retract" => self.retract(params),
             "forget" => self.forget(params),
@@ -237,6 +238,7 @@ impl Service {
             limit: p.limit,
             budget_tokens: p.budget,
             entity_boost: true,
+            expand_top: p.expand_top.unwrap_or(DEFAULT_EXPAND_TOP),
             ..Query::default()
         };
         let recall = self.store.recall(&query);
@@ -249,6 +251,23 @@ impl Service {
         }
         crate::obs::record_recall();
         Ok(serde_json::to_value(recall)?)
+    }
+
+    fn brief(&self, params: Value) -> Result<Value> {
+        let p: BriefParams = serde_json::from_value(params)?;
+        self.wait_if_needed(p.min_offset)?;
+        let req = BriefRequest {
+            text: p.query.unwrap_or_default(),
+            scopes: p.scopes.unwrap_or_default(),
+            context: ctx_map(p.ctx.unwrap_or_default()),
+            limit: p.limit,
+            budget_tokens: p.budget,
+            min_offset: p.min_offset,
+            ..BriefRequest::default()
+        };
+        let brief = self.store.brief(&req);
+        crate::obs::record_recall();
+        Ok(serde_json::to_value(brief)?)
     }
 
     fn show(&self, params: Value) -> Result<Value> {
@@ -491,10 +510,21 @@ struct RecallParams {
     all_contexts: Option<bool>,
     limit: Option<usize>,
     budget: Option<usize>,
+    expand_top: Option<usize>,
     min_offset: Option<u64>,
     /// Used for session-taint keying when this recall returns untrusted content.
     #[serde(default)]
     actor: ActorParams,
+}
+
+#[derive(Debug, Deserialize)]
+struct BriefParams {
+    query: Option<String>,
+    scopes: Option<Vec<Scope>>,
+    ctx: Option<Vec<(String, String)>>,
+    limit: Option<usize>,
+    budget: Option<usize>,
+    min_offset: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

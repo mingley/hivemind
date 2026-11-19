@@ -15,7 +15,10 @@ use hivemind_core::{
     Actor, ActorKind, BlobHash, Citation, ClaimData, ClaimId, ClaimKind, EdgeKind, EvidenceRef,
     Method, Origin, Outcome, Provenance, RetractReason, Scope, Timestamp,
 };
-use hivemind_engine::{ClaimDetail, Query, Recall, Receipt, Remember, Store, render_card};
+use hivemind_engine::{
+    BriefRequest, ClaimDetail, DEFAULT_EXPAND_TOP, Query, Recall, Receipt, Remember, Store,
+    render_card,
+};
 use serde::Serialize;
 
 #[derive(Parser, Debug)]
@@ -66,6 +69,8 @@ enum Command {
     Remember(RememberArgs),
     /// Search memories; prints compact cards.
     Recall(RecallArgs),
+    /// Emit a token-budgeted, taint-free Turn-0 ambient memory briefing (supports --hook-json).
+    Brief(BriefArgs),
     /// Show one claim in full: provenance, lifecycle, belief, and links.
     Show(ShowArgs),
     /// Mark a claim as wrong, misrecorded, or a duplicate.
@@ -289,7 +294,7 @@ struct EvidenceArgs {
     quotes: Vec<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 struct ContextArgs {
     /// Context for applicability, such as os=linux or dep:cargo/tokio=1.47.1 (repeatable).
     #[arg(long = "ctx", value_name = "KEY=VALUE", value_parser = parse_pair)]
@@ -329,6 +334,29 @@ struct RecallArgs {
     /// Token budget for the returned cards.
     #[arg(long)]
     budget: Option<usize>,
+    /// Auto-expand up to the top N non-untrusted cards [default: 3].
+    #[arg(long)]
+    expand_top: Option<usize>,
+}
+
+#[derive(Args, Debug, Clone)]
+struct BriefArgs {
+    /// Optional prompt or query text to rank relevant memories against.
+    query: Vec<String>,
+    /// Scope to include (repeatable). When omitted in --hook-json mode, inferred from cwd.
+    #[arg(long = "scope")]
+    scopes: Vec<Scope>,
+    #[command(flatten)]
+    context: ContextArgs,
+    /// Maximum claims to include in the briefing [default: 3].
+    #[arg(long)]
+    limit: Option<usize>,
+    /// Token budget for the briefing [default: 600].
+    #[arg(long)]
+    budget: Option<usize>,
+    /// Read Copilot/Claude hook JSON from stdin (`prompt`, `cwd`) and emit `{"additionalContext": ...}` fail-open.
+    #[arg(long)]
+    hook_json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -545,6 +573,11 @@ fn run(cli: Cli) -> Result<()> {
         Command::Mcp { daemon } => {
             return hivemind::mcp::main_sync(dir, daemon.clone());
         }
+        Command::Brief(args) if args.hook_json => {
+            // Hooks must always fail open so they never block an interactive or headless agent turn.
+            let _ = run_hook_brief(&dir, cli.no_fsync, &cli.embedder, args);
+            return Ok(());
+        }
         Command::Daemon(args) => {
             let mut args = args.clone();
             if args.dir.is_none() {
@@ -707,6 +740,7 @@ fn run(cli: Cli) -> Result<()> {
                 limit: args.limit,
                 budget_tokens: args.budget,
                 entity_boost: true,
+                expand_top: args.expand_top.unwrap_or(DEFAULT_EXPAND_TOP),
                 ..Query::default()
             };
             let result = store.recall(&query);
@@ -714,6 +748,25 @@ fn run(cli: Cli) -> Result<()> {
                 out.print_json(&result)
             } else {
                 print_recall(&result);
+                Ok(())
+            }
+        }
+        Command::Brief(args) => {
+            let req = BriefRequest {
+                text: args.query.join(" "),
+                scopes: args.scopes,
+                context: context(&args.context),
+                limit: args.limit,
+                budget_tokens: args.budget,
+                ..BriefRequest::default()
+            };
+            let brief = store.brief(&req);
+            if out.json {
+                out.print_json(&brief)
+            } else {
+                if !brief.rendered.is_empty() {
+                    print!("{}", brief.rendered);
+                }
                 Ok(())
             }
         }
@@ -993,6 +1046,7 @@ fn run_via_daemon(
                 "all_contexts": args.all_contexts,
                 "limit": args.limit,
                 "budget": args.budget,
+                "expand_top": args.expand_top,
                 "actor": actor_params,
             });
             let result = backend
@@ -1000,6 +1054,29 @@ fn run_via_daemon(
                 .expect("daemon backend");
             // Text mode prints the JSON cards; full card formatting needs a local store.
             out.print_json(&result)
+        }
+        Command::Brief(args) => {
+            let ctx: Vec<(String, String)> = context(&args.context).into_iter().collect();
+            let params = json!({
+                "query": args.query.join(" "),
+                "scopes": args.scopes,
+                "ctx": ctx,
+                "limit": args.limit,
+                "budget": args.budget,
+            });
+            let result = backend
+                .call_daemon("brief", params)?
+                .expect("daemon backend");
+            if out.json {
+                out.print_json(&result)
+            } else {
+                if let Some(rendered) = result.get("rendered").and_then(|v| v.as_str())
+                    && !rendered.is_empty()
+                {
+                    print!("{rendered}");
+                }
+                Ok(())
+            }
         }
         Command::Show(args) => {
             let ctx: Vec<(String, String)> = context(&args.context).into_iter().collect();
@@ -1440,6 +1517,164 @@ fn context(args: &ContextArgs) -> Context {
         hivemind_core::merge_lockfile_fingerprint(&root, &mut ctx);
     }
     ctx
+}
+
+fn infer_hook_scope(cwd_opt: Option<&str>) -> Option<Scope> {
+    let raw = cwd_opt?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let path = Path::new(raw);
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let home_resolved = fs::canonicalize(&home).unwrap_or(home);
+        if resolved == home_resolved {
+            return Some(Scope::Global);
+        }
+    }
+    let name = std::process::Command::new("git")
+        .args(["-C", raw, "rev-parse", "--show-toplevel"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|top| {
+            Path::new(top.trim())
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .or_else(|| {
+            resolved
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })?;
+    let slug: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = slug.trim_matches('-');
+    if trimmed.is_empty() {
+        None
+    } else {
+        format!("project:{trimmed}").parse().ok()
+    }
+}
+
+fn run_hook_brief(
+    dir: &Path,
+    no_fsync: bool,
+    embedder: &hivemind::embedder::EmbedderArgs,
+    args: &BriefArgs,
+) -> Result<()> {
+    use std::io::IsTerminal as _;
+
+    if !dir.join("MANIFEST").is_file() {
+        return Ok(());
+    }
+
+    let payload: serde_json::Value = if io::stdin().is_terminal() {
+        serde_json::Value::Null
+    } else {
+        let mut raw = String::new();
+        let _ = io::stdin().read_to_string(&mut raw);
+        serde_json::from_str(raw.trim()).unwrap_or(serde_json::Value::Null)
+    };
+
+    let query_text = if !args.query.is_empty() {
+        args.query.join(" ")
+    } else {
+        payload
+            .get("prompt")
+            .or_else(|| payload.get("userPrompt"))
+            .or_else(|| payload.get("user_prompt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned()
+    };
+
+    let mut scopes = args.scopes.clone();
+    if scopes.is_empty() {
+        let cwd_str = payload.get("cwd").and_then(|v| v.as_str());
+        if let Some(inferred) = infer_hook_scope(cwd_str) {
+            scopes.push(inferred);
+        }
+    }
+    if !scopes.is_empty() && !scopes.contains(&Scope::Global) {
+        scopes.push(Scope::Global);
+    }
+
+    let ctx_map = context(&args.context);
+    let rendered = if let Ok(mut client) = hivemind::client::Client::connect(dir) {
+        let ctx_vec: Vec<(String, String)> = ctx_map.into_iter().collect();
+        let val = client.call(
+            "brief",
+            serde_json::json!({
+                "query": query_text,
+                "scopes": scopes,
+                "ctx": ctx_vec,
+                "limit": args.limit,
+                "budget": args.budget,
+            }),
+        )?;
+        val.get("rendered")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned()
+    } else {
+        let mut backend = hivemind::backend::Backend::open_with_embedder(dir, no_fsync, embedder)?;
+        if backend.is_daemon() {
+            let ctx_vec: Vec<(String, String)> = ctx_map.into_iter().collect();
+            let val = backend
+                .call_daemon(
+                    "brief",
+                    serde_json::json!({
+                        "query": query_text,
+                        "scopes": scopes,
+                        "ctx": ctx_vec,
+                        "limit": args.limit,
+                        "budget": args.budget,
+                    }),
+                )?
+                .unwrap_or(serde_json::Value::Null);
+            val.get("rendered")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned()
+        } else if let Some(store) = backend.store() {
+            store
+                .brief(&BriefRequest {
+                    text: query_text,
+                    scopes,
+                    context: ctx_map,
+                    limit: args.limit,
+                    budget_tokens: args.budget,
+                    ..BriefRequest::default()
+                })
+                .rendered
+        } else {
+            String::new()
+        }
+    };
+
+    if !rendered.trim().is_empty() {
+        let context_msg = format!(
+            "{}\n(Matched Hivemind claims above are already expanded with full text, fields, and citations; skip calling hivemind recall/show unless searching additional topics.)",
+            rendered.trim_end()
+        );
+        println!(
+            "{}",
+            serde_json::json!({ "additionalContext": context_msg })
+        );
+    }
+    Ok(())
 }
 
 fn parse_time(text: &str) -> Result<Timestamp> {

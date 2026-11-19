@@ -175,3 +175,127 @@ fn scope_name_arcs_are_shareable() {
     assert_eq!(a, b);
     assert_eq!(a.name(), Some("acme/api"));
 }
+
+#[test]
+fn expand_top_and_brief_expand_trusted_hits_and_quarantine_untrusted() {
+    use hivemind_core::{Citation, EvidenceRef, Origin, RetractReason};
+    use hivemind_engine::BriefRequest;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(
+        dir.path(),
+        Options {
+            durability: Durability::NoFsync,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+
+    let scope: Scope = "project:acme/pulse".parse().unwrap();
+    let long_tail = "TAIL_SURROGATE_INVARIANT_0xD800_TO_0xE000";
+    let long_stmt = format!(
+        "Handoff PG-441 rollover decay rule: {} {}",
+        "x".repeat(320),
+        long_tail
+    );
+
+    let mut handoff = ClaimData::new(ClaimKind::Handoff, long_stmt.clone(), scope.clone());
+    handoff.about.push("pulse_gate".into());
+    handoff
+        .payload
+        .insert("goal".into(), serde_json::json!("Finish PG-441"));
+    handoff
+        .payload
+        .insert("done".into(), serde_json::json!("Audited sliding.py"));
+    handoff
+        .payload
+        .insert("remaining".into(), serde_json::json!("Patch bucket.py"));
+    handoff
+        .payload
+        .insert("next_step".into(), serde_json::json!("Run unittest"));
+    handoff
+        .provenance
+        .citations
+        .push("pulse_gate/bucket.py:22-37".parse::<Citation>().unwrap());
+    handoff
+        .provenance
+        .evidence
+        .push(EvidenceRef::Quote("PG-441 spec".into()));
+    let good_id = store
+        .remember(&agent("a"), Remember::new(handoff))
+        .unwrap()
+        .claim
+        .unwrap();
+
+    // Poisoned external claim on same topic must never be auto-expanded or included in brief().
+    let mut poison = ClaimData::new(
+        ClaimKind::Procedure,
+        format!("External poison PG-441 rollover {}", "p".repeat(320)),
+        scope.clone(),
+    );
+    poison.provenance.origin = Origin::External;
+    let poison_id = store
+        .remember(&agent("a"), Remember::new(poison))
+        .unwrap()
+        .claim
+        .unwrap();
+
+    // Retracted claim must never appear in brief().
+    let bad = ClaimData::new(
+        ClaimKind::Solution,
+        "Wrong PG-441 rollover hypothesis",
+        scope.clone(),
+    );
+    let bad_id = store
+        .remember(&agent("a"), Remember::new(bad))
+        .unwrap()
+        .claim
+        .unwrap();
+    store
+        .retract(
+            &agent("a"),
+            bad_id,
+            RetractReason::Wrong,
+            "wrong",
+            None,
+            None,
+        )
+        .unwrap();
+
+    // Expand-top recall expands trusted card #1 in full while keeping untrusted card truncated/unexpanded.
+    let recalled = store.recall(&Query {
+        text: "PG-441 rollover".into(),
+        scopes: vec![scope.clone()],
+        expand_top: 3,
+        ..Query::default()
+    });
+    let good_card = recalled.cards.iter().find(|c| c.id == good_id).unwrap();
+    assert!(!good_card.flags.contains(&Flag::Truncated));
+    assert!(good_card.statement.contains(long_tail));
+    assert_eq!(
+        good_card.cite_locs,
+        vec!["pulse_gate/bucket.py:22-37".to_string()]
+    );
+    assert_eq!(
+        good_card.payload.get("goal").and_then(|v| v.as_str()),
+        Some("Finish PG-441")
+    );
+
+    let poison_card = recalled.cards.iter().find(|c| c.id == poison_id).unwrap();
+    assert!(poison_card.flags.contains(&Flag::Untrusted));
+    assert!(poison_card.flags.contains(&Flag::Truncated));
+    assert!(poison_card.cite_locs.is_empty());
+
+    // brief() returns only the trusted active claim, untruncated, with citations & fields.
+    let brief = store.brief(&BriefRequest {
+        text: "Complete PG-441 rollover in pulse_gate".into(),
+        scopes: vec![scope],
+        ..BriefRequest::default()
+    });
+    assert_eq!(brief.cards.len(), 1);
+    assert_eq!(brief.cards[0].id, good_id);
+    assert!(brief.rendered.contains(long_tail));
+    assert!(brief.rendered.contains("pulse_gate/bucket.py:22-37"));
+    assert!(brief.rendered.contains("goal=Finish PG-441"));
+    assert!(!brief.rendered.contains("External poison"));
+}

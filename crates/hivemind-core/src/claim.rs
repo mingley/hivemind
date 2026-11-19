@@ -218,7 +218,7 @@ impl Provenance {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ClaimData {
     pub kind: ClaimKind,
-    /// One or two sentences written for a future reader.
+    /// Self-contained technical statement written for a future reader (up to 2,000 chars).
     pub statement: String,
     pub scope: Scope,
     /// Canonical keys of the entities this claim is about, such as
