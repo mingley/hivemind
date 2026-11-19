@@ -151,7 +151,7 @@ impl std::fmt::Debug for HiveMcp {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RememberArgs {
-    /// Complete, self-contained technical statement for a future reader (up to 2,000 chars). Preserve all verified constants, lookup tables, formulas, types, and boundary/edge-case rules rather than summarizing them away.
+    /// Complete, self-contained technical specification or finding for a future reader (up to 2,000 chars; concise multi-bullet lists are encouraged). Include every verified constant, table entry, formula, and exact boundary rule (e.g. rounding, tie-breaking, half-open endpoints, zero/empty inputs, and post-window advancement) verbatim rather than paraphrasing.
     pub statement: String,
     /// fact, decision, preference, procedure, solution, warning, question, or handoff.
     #[serde(default = "default_kind")]

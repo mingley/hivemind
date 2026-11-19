@@ -21,7 +21,7 @@ pub const DEFAULT_LIMIT: usize = 8;
 pub const DEFAULT_BUDGET_TOKENS: usize = 1_200;
 pub const DEFAULT_EXPAND_TOP: usize = 3;
 pub const DEFAULT_BRIEF_LIMIT: usize = 3;
-pub const DEFAULT_BRIEF_BUDGET_TOKENS: usize = 600;
+pub const DEFAULT_BRIEF_BUDGET_TOKENS: usize = 900;
 /// Relative score floor (`0.40 * top_score`) when `BriefRequest.text` is non-empty so
 /// weak accidental single-word distractor overlaps are omitted from Turn-0 context.
 pub const BRIEF_MIN_RELATIVE_SCORE: f32 = 0.40;

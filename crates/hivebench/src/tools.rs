@@ -26,7 +26,7 @@ pub fn hivemind_mcp_tools() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "statement": { "type": "string", "description": "Complete, self-contained technical statement for a future reader (up to 2,000 chars). Preserve all verified constants, lookup tables, formulas, types, and boundary/edge-case rules rather than summarizing them away." },
+                    "statement": { "type": "string", "description": "Complete, self-contained technical specification or finding for a future reader (up to 2,000 chars; concise multi-bullet lists are encouraged). Include every verified constant, table entry, formula, and exact boundary rule verbatim rather than paraphrasing." },
                     "kind": { "type": "string", "description": "fact, decision, preference, procedure, solution, warning, question, or handoff.", "default": "fact" },
                     "scope": { "type": "string", "description": "Owning scope, such as project:github.com/acme/api." },
                     "about": { "type": "array", "items": { "type": "string" }, "description": "Entity keys the claim is about." },
