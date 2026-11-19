@@ -111,7 +111,7 @@ jobs:
           (cd release-assets && sha256sum install.sh QUICKSTART.md >> SHA256SUMS)
       - uses: softprops/action-gh-release@v2
         with:
-          body_path: docs/releases/v0.1.0.md
+          body_path: docs/releases/${{ github.ref_name }}.md
           files: |
             release-assets/*.tar.gz
             release-assets/SHA256SUMS

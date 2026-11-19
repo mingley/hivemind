@@ -248,6 +248,27 @@ there, either disable sandboxing for MCP subprocesses or start `hivemindd`
 outside the sandbox and grant the store path. Prefer the
 [Claude Code](#claude-code) path when you need a proven default.
 
+### Turn-0 Prompt Hook (`hivemind brief --hook-json`)
+
+To inject top matching, non-untrusted, untruncated project memories on Turn 0
+with zero extra MCP tool round-trips, wire `hivemind brief --here --hook-json`
+into `userPromptSubmitted` (`~/.copilot/settings.json` or Claude Code
+`UserPromptSubmit`):
+
+```json
+{
+  "hooks": {
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "bash": "$HOME/.local/bin/hivemind brief --here --hook-json",
+        "timeoutSec": 2
+      }
+    ]
+  }
+}
+```
+
 ## Verify from an agent
 
 Once the client lists the `hivemind` server and its tools (`remember`,

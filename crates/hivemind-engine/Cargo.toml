@@ -17,7 +17,7 @@ embeddings-hf = ["embeddings", "model2vec-rs/hf-hub"]
 [dependencies]
 blake3 = "1.8.7"
 crc32c = "0.6.9"
-hivemind-core = { version = "0.1.0", path = "../hivemind-core" }
+hivemind-core = { version = "0.2.0", path = "../hivemind-core" }
 memmap2 = "0.9"
 smallvec = { version = "1.16.5", features = ["union"] }
 # Local-path Model2Vec inference; no Hub download unless `embeddings-hf`.

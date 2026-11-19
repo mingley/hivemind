@@ -233,7 +233,7 @@ the LazyFS power-loss gap: [f13-crash-injection.md](f13-crash-injection.md).
 
 ## Release binaries (CI)
 
-[Download v0.1.0](https://github.com/mingley/hivemind/releases/tag/v0.1.0)
+[Download v0.2.0](https://github.com/mingley/hivemind/releases/tag/v0.2.0)
 or use the [quickstart installer](quickstart.md). Native archives support
 macOS 13+ on Apple Silicon and Intel, and Linux glibc 2.35+ on x86-64 / ARM64.
 Each contains `hivemind`, `hivemindd`, `LICENSE`, and binary `SHA256SUMS`.

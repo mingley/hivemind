@@ -85,14 +85,14 @@ hm show <id-prefix>          # full claim: provenance, belief, links
 hm recall _SSL_CTX_new --ctx os=linux   # → no matching memories (the fix doesn't apply)
 ```
 
-Other commands: `retract`, `invalidate`, `link`, `feedback`, `put`, `cat`,
-`log` (the change feed), `stats`, `verify`, `mcp`, and `daemon`. Run
-`hm --help` for the rest. Agent wiring:
+Other commands: `brief` (Turn-0 hook briefing), `retract`, `invalidate`,
+`link`, `feedback`, `put`, `cat`, `log` (the change feed), `stats`, `verify`,
+`mcp`, and `daemon`. Run `hm --help` for the rest. Agent wiring:
 [docs/setup-mcp.md](docs/setup-mcp.md).
 
 ## Status and measurements
 
-Native downloads: [v0.1.0](https://github.com/mingley/hivemind/releases/tag/v0.1.0)
+Native downloads: [v0.2.0](https://github.com/mingley/hivemind/releases/tag/v0.2.0)
 for Apple Silicon / Intel Macs and Linux x86-64 / ARM64. See the
 [quickstart](docs/quickstart.md) to install, run a one-minute test, and connect
 Codex or Claude Code without compiling Rust.

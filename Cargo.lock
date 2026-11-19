@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "hivebench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1069,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "hivemind"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "hivemind-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "humantime",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "hivemind-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "crc32c",

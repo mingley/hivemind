@@ -36,9 +36,12 @@ for _ in $(seq 1 100); do
 done
 "$HM" --dir "$RUN_DIR/store" --json remember "Second agent shares this daemon" --scope project:release > "$RUN_DIR/daemon-receipt.json"
 "$HM" --dir "$RUN_DIR/store" --json recall "Second agent" > "$RUN_DIR/daemon-recall.json"
+printf '{"prompt":"Second agent","cwd":"%s"}\n' "$RUN_DIR" | "$HM" --dir "$RUN_DIR/store" brief --scope project:release --hook-json > "$RUN_DIR/brief-hook.json"
 python3 - "$RUN_DIR" <<'PY'
 import json, pathlib, sys
 p=pathlib.Path(sys.argv[1]); receipt=json.loads((p/'daemon-receipt.json').read_text()); recall=json.loads((p/'daemon-recall.json').read_text())
+brief=json.loads((p/'brief-hook.json').read_text())
 assert any(c['id']==receipt['claim'] for c in recall['cards']), recall
+assert 'Second agent shares this daemon' in brief.get('additionalContext', ''), brief
 PY
 printf 'Release smoke passed: remember, recall, verify, backup/restore, shared daemon.\n'

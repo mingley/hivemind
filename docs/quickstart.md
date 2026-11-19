@@ -1,4 +1,4 @@
-# Download and try Hivemind v0.1.0
+# Download and try Hivemind v0.2.0
 
 Native binaries are available for macOS 13+ (Apple Silicon and Intel) and Linux
 with glibc 2.35+ (x86-64 and ARM64). Windows users can use the Linux build in WSL2.
@@ -9,8 +9,8 @@ No Rust compiler, model download, or external database is required.
 Download the installer from the release, then run it:
 
 ```sh
-curl -fsSL https://github.com/mingley/hivemind/releases/download/v0.1.0/install.sh -o /tmp/hivemind-install.sh
-HIVEMIND_VERSION=v0.1.0 sh /tmp/hivemind-install.sh
+curl -fsSL https://github.com/mingley/hivemind/releases/download/v0.2.0/install.sh -o /tmp/hivemind-install.sh
+HIVEMIND_VERSION=v0.2.0 sh /tmp/hivemind-install.sh
 export PATH="$HOME/.local/bin:$PATH"
 hivemind --version
 ```
@@ -22,7 +22,7 @@ directory so MCP can find the daemon. Add that directory to your shell's PATH
 for future sessions. The macOS binaries are ad-hoc signed without Developer ID notarization; a
 browser download or local Gatekeeper policy can require approving them before use.
 
-Manual download: https://github.com/mingley/hivemind/releases/tag/v0.1.0
+Manual download: https://github.com/mingley/hivemind/releases/tag/v0.2.0
 Each archive contains both binaries, the MIT license, and binary checksums.
 The release's `SHA256SUMS` also verifies the archives themselves.
 
@@ -60,7 +60,7 @@ Restart the agent, then ask it to remember a project fact, recall it, and expand
 it with `show`. Agents using the same store share one daemon automatically.
 If an agent's sandbox restricts Unix sockets, allow its configured store socket
 or run the MCP integration outside that restriction; details are in
-https://github.com/mingley/hivemind/blob/v0.1.0/docs/setup-mcp.md.
+https://github.com/mingley/hivemind/blob/v0.2.0/docs/setup-mcp.md.
 
 ## Supported deployment
 
@@ -74,4 +74,4 @@ For remote teams, configure server-owned tenant grants and a TLS reverse proxy;
 use machine OAuth credentials for agents and retain the bootstrap bearer for
 administration. Complete backups include log, manifest, and evidence blobs.
 There is no automatic multi-node failover. Setup and restore instructions:
-https://github.com/mingley/hivemind/blob/v0.1.0/docs/operations.md.
+https://github.com/mingley/hivemind/blob/v0.2.0/docs/operations.md.
